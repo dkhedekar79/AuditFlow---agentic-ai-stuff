@@ -4,14 +4,9 @@ Run from the repository root::
 
     streamlit run app/ui.py
 
-The dashboard has three jobs:
-
-1. accept a receipt (PDF, JSON, pasted text or bundled sample),
-2. show what the agent extracted and which deterministic checks failed,
-3. hand flagged invoices to a reviewer with one-click approve/reject.
-
-It calls the same :func:`app.agent.run_audit` entry point as the API, so the UI
-adds no business logic of its own.
+The interface is deliberately quiet: one product statement, one receipt, one
+decision. All business logic lives in :func:`app.agent.run_audit`; this module is
+presentation only.
 """
 
 from __future__ import annotations
@@ -22,6 +17,7 @@ import logging
 import sys
 from datetime import datetime
 from pathlib import Path
+from textwrap import dedent
 
 # ``streamlit run app/ui.py`` puts the script directory on sys.path, not the
 # repository root. Make ``import app`` work from a fresh clone.
@@ -63,71 +59,235 @@ from app.tools import get_policy_summary  # noqa: E402
 
 logger = logging.getLogger(__name__)
 
+GITHUB_URL = "https://github.com/dkhedekar79/AuditFlow---agentic-ai-stuff"
+
 st.set_page_config(
-    page_title="AuditFlow · HITL Invoice Auditor",
-    page_icon="🧾",
+    page_title="AuditFlow",
     layout="wide",
-    initial_sidebar_state="expanded",
+    initial_sidebar_state="collapsed",
 )
 
 _STATUS_META: dict[AuditStatus, tuple[str, str]] = {
-    AuditStatus.PENDING_REVIEW: ("pending", "⏳ Pending review"),
-    AuditStatus.AUTO_APPROVED: ("auto", "✅ Auto-approved"),
-    AuditStatus.APPROVED: ("approved", "✅ Approved"),
-    AuditStatus.REJECTED: ("rejected", "⛔ Rejected"),
+    AuditStatus.PENDING_REVIEW: ("pending", "Needs review"),
+    AuditStatus.AUTO_APPROVED: ("auto", "Auto-approved"),
+    AuditStatus.APPROVED: ("approved", "Approved"),
+    AuditStatus.REJECTED: ("rejected", "Rejected"),
 }
 
 _SAMPLE_LABELS: dict[str, str] = {
-    "01_clean_software_receipt.txt": "Clean software invoice · expect auto-approval",
-    "02_over_limit_travel.json": "Over-budget travel · expect human review",
-    "03_duplicate_software_receipt.txt": "Duplicate resubmission · run the clean sample first",
-    "04_unapproved_vendor_receipt.json": "Blocked vendor · expect human review",
-}
-
-_TRACE_ICONS: dict[str, str] = {
-    "system": "⚙️",
-    "extraction": "📄",
-    "llm": "🤖",
-    "tool": "🛠️",
-    "policy": "🛡️",
-    "routing": "🚦",
-    "human": "🧑‍⚖️",
+    "01_clean_software_receipt.txt": "Clean software invoice",
+    "02_over_limit_travel.json": "Travel over budget",
+    "03_duplicate_software_receipt.txt": "Duplicate submission",
+    "04_unapproved_vendor_receipt.json": "Blocked vendor",
 }
 
 _CSS = """
 <style>
-.block-container { padding-top: 1.6rem; padding-bottom: 3rem; max-width: 1280px; }
-.af-hero {
-  border: 1px solid #e2e8f0; border-radius: 20px; padding: 1.4rem 1.6rem;
-  background: linear-gradient(120deg, #f0fdfa 0%, #f8fafc 55%, #ecfeff 100%);
-  margin-bottom: 1rem;
+:root {
+  --af-ink: #1d1d1f;
+  --af-muted: #6e6e73;
+  --af-faint: #86868b;
+  --af-surface: #f5f5f7;
+  --af-line: #d2d2d7;
+  --af-blue: #0071e3;
+  --af-green: #248a3d;
+  --af-orange: #b25000;
+  --af-red: #d70015;
 }
-.af-kicker {
-  font-size: 0.72rem; letter-spacing: 0.14em; text-transform: uppercase;
-  color: #0f766e; font-weight: 700;
+html, body, .stApp, [class*="st-"] {
+  font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "SF Pro Display",
+    "Helvetica Neue", Helvetica, Arial, sans-serif;
+  -webkit-font-smoothing: antialiased;
 }
-.af-title { font-size: 2rem; font-weight: 800; color: #0f172a; margin: 0.1rem 0; }
-.af-subtitle { color: #475569; font-size: 1rem; margin-bottom: 0.7rem; }
-.af-chip {
-  display: inline-block; background: #0f766e; color: #ffffff; border-radius: 999px;
-  padding: 0.18rem 0.7rem; font-size: 0.75rem; font-weight: 600; margin-right: 0.35rem;
+.stApp { background: #ffffff; color: var(--af-ink); }
+header[data-testid="stHeader"], #MainMenu, footer,
+[data-testid="stToolbar"], [data-testid="stDecoration"] {
+  display: none !important;
 }
-.af-chip.muted { background: #e2e8f0; color: #334155; font-weight: 500; }
-.af-badge {
-  display: inline-block; border-radius: 999px; padding: 0.22rem 0.75rem;
-  font-size: 0.8rem; font-weight: 700; letter-spacing: 0.01em;
+.block-container { max-width: 1040px; padding: 0 28px 88px; }
+@media (max-width: 734px) { .block-container { padding: 0 20px 64px; } }
+
+/* ── Navigation ─────────────────────────────────────────── */
+.af-nav {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 18px 0 16px; border-bottom: 1px solid var(--af-line);
+  font-size: 12px;
 }
-.af-badge.pending { background: #fef3c7; color: #92400e; }
-.af-badge.auto { background: #dcfce7; color: #166534; }
-.af-badge.approved { background: #dbeafe; color: #1e40af; }
-.af-badge.rejected { background: #fee2e2; color: #991b1b; }
+.af-wordmark { font-size: 17px; font-weight: 600; letter-spacing: -0.02em; }
+.af-nav-right { display: flex; align-items: center; gap: 22px; color: var(--af-faint); }
+.af-nav a { color: var(--af-ink); text-decoration: none; }
+.af-nav a:hover { color: var(--af-blue); }
+.af-nav-mode { display: inline-flex; align-items: center; gap: 7px; color: var(--af-faint); }
+.af-nav-mode .af-dot { background: var(--af-faint); }
+
+/* ── Hero ───────────────────────────────────────────────── */
+.af-hero { padding: 76px 0 44px; max-width: 840px; }
+.af-eyebrow {
+  font-size: 11px; font-weight: 600; letter-spacing: 0.14em;
+  text-transform: uppercase; color: var(--af-faint); margin: 0 0 20px;
+}
+.af-hero h1 {
+  font-size: clamp(44px, 6.2vw, 76px); line-height: 1.04;
+  letter-spacing: -0.035em; font-weight: 600; margin: 0 0 24px;
+}
+.af-lede {
+  font-size: clamp(18px, 2.1vw, 23px); line-height: 1.42;
+  letter-spacing: -0.01em; color: var(--af-muted); max-width: 700px;
+  margin: 0 0 26px;
+}
+.af-actions { display: flex; gap: 26px; align-items: center; font-size: 16px; }
+.af-link { color: var(--af-blue); text-decoration: none; font-weight: 500; }
+.af-link:hover { text-decoration: underline; }
+.af-link.secondary { color: var(--af-muted); font-weight: 400; }
+
+/* ── Product stage ─────────────────────────────────────── */
+.af-stage {
+  background: var(--af-surface); border-radius: 28px; padding: 44px 28px;
+  display: flex; justify-content: center; margin: 0 0 52px;
+}
+.af-receipt {
+  background: #ffffff; width: 410px; max-width: 100%; border-radius: 18px;
+  padding: 24px 26px; box-shadow: 0 30px 60px rgba(0, 0, 0, 0.08);
+}
+.af-receipt-top {
+  display: flex; justify-content: space-between; font-size: 10px;
+  letter-spacing: 0.1em; text-transform: uppercase; color: var(--af-faint);
+}
+.af-receipt-vendor { font-size: 21px; font-weight: 600; letter-spacing: -0.02em; margin: 20px 0 2px; }
+.af-receipt-amount { font-size: 33px; font-weight: 600; letter-spacing: -0.03em; margin: 0 0 18px; }
+.af-receipt-rule { height: 1px; background: var(--af-line); margin-bottom: 10px; }
+.af-receipt-row {
+  display: flex; justify-content: space-between; font-size: 13px;
+  color: var(--af-muted); padding: 6px 0;
+}
+.af-receipt-row strong { color: var(--af-ink); font-weight: 500; }
+.af-receipt-row .over { color: var(--af-orange); }
+.af-receipt-status {
+  display: flex; align-items: center; gap: 8px; font-size: 13px;
+  font-weight: 500; color: var(--af-orange); margin-top: 16px;
+}
+
+/* ── Segmented tabs ────────────────────────────────────── */
+div[data-baseweb="tab-list"] {
+  background: var(--af-surface); border-radius: 999px; padding: 4px;
+  gap: 0; width: max-content; max-width: 100%; margin: 0 0 44px;
+}
+button[data-baseweb="tab"] {
+  border-radius: 999px; padding: 8px 20px; font-size: 13px;
+  font-weight: 500; color: var(--af-muted); background: transparent;
+}
+button[data-baseweb="tab"][aria-selected="true"] {
+  background: #ffffff; color: var(--af-ink);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.08);
+}
+div[data-baseweb="tab-highlight"], div[data-baseweb="tab-border"] { display: none; }
+
+/* ── Sections and type ─────────────────────────────────── */
+.af-section-title { font-size: clamp(27px, 3.2vw, 38px); font-weight: 600; letter-spacing: -0.025em; margin: 0 0 10px; }
+.af-section-copy { font-size: 15px; line-height: 1.5; color: var(--af-muted); max-width: 620px; margin: 0 0 28px; }
+.af-label { font-size: 11px; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase; color: var(--af-faint); margin: 0 0 10px; }
+.af-meta { font-size: 12px; color: var(--af-faint); }
+[data-testid="stCaptionContainer"] p { font-size: 12px; color: var(--af-faint); }
+label p, [data-testid="stWidgetLabel"] p { font-size: 13px; font-weight: 500; color: var(--af-ink); }
+h2, h3, h4 { letter-spacing: -0.02em; }
+
+/* ── Inputs ────────────────────────────────────────────── */
+[data-baseweb="select"] > div {
+  border-radius: 12px !important; border-color: var(--af-line) !important;
+  background: #ffffff !important; min-height: 44px;
+}
+[data-testid="stFileUploaderDropzone"] {
+  border: 1px dashed var(--af-line); border-radius: 18px;
+  background: var(--af-surface); padding: 20px;
+}
+[data-testid="stFileUploaderDropzone"] button {
+  border-radius: 999px; border: 1px solid var(--af-line);
+  background: #ffffff; color: var(--af-ink); font-size: 13px;
+}
+textarea, input[type="text"] {
+  border-radius: 14px !important; border-color: var(--af-line) !important;
+  background: #ffffff !important; font-size: 14px !important;
+}
+.stButton > button, .stDownloadButton > button {
+  border-radius: 999px; border: 1px solid var(--af-line); background: #ffffff;
+  color: var(--af-ink); font-size: 14px; font-weight: 500; padding: 9px 20px;
+}
+.stButton > button:hover, .stDownloadButton > button:hover {
+  border-color: var(--af-faint); background: #ffffff; color: var(--af-ink);
+}
+.stButton > button[kind="primary"], [data-testid="baseButton-primary"] {
+  background: var(--af-blue); border-color: var(--af-blue); color: #ffffff;
+}
+.stButton > button[kind="primary"]:hover {
+  background: #0077ed; border-color: #0077ed; color: #ffffff;
+}
+[data-testid="stExpander"] {
+  border: 1px solid var(--af-line); border-radius: 14px;
+  background: #ffffff; margin-bottom: 8px;
+}
+[data-testid="stExpander"] summary { font-size: 14px; font-weight: 500; padding: 13px 16px; }
+[data-testid="stExpander"] summary:hover { color: var(--af-blue); }
+[data-testid="stAlert"] {
+  border-radius: 14px; border: 1px solid var(--af-line);
+  background: var(--af-surface); color: var(--af-ink);
+}
+div[data-testid="stMetricValue"] { font-size: 27px; font-weight: 600; letter-spacing: -0.02em; }
+label[data-testid="stMetricLabel"] p {
+  font-size: 10px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--af-faint);
+}
+[data-testid="stDataFrame"] { border: 1px solid var(--af-line); border-radius: 12px; overflow: hidden; }
+
+/* ── Status and checks ─────────────────────────────────── */
+.af-dot { display: inline-block; width: 7px; height: 7px; border-radius: 50%; background: currentColor; }
+.af-status {
+  display: inline-flex; align-items: center; gap: 8px; font-size: 11px;
+  font-weight: 600; letter-spacing: 0.07em; text-transform: uppercase;
+}
+.af-status.pending { color: var(--af-orange); }
+.af-status.auto { color: var(--af-green); }
+.af-status.approved { color: var(--af-blue); }
+.af-status.rejected { color: var(--af-red); }
+.af-checks { border-top: 1px solid var(--af-line); margin-top: 6px; }
+.af-check { display: flex; gap: 13px; align-items: flex-start; padding: 15px 0; border-bottom: 1px solid var(--af-line); }
+.af-check .af-dot { margin-top: 7px; }
+.af-check .af-dot.pass { color: var(--af-green); }
+.af-check .af-dot.fail { color: var(--af-red); }
+.af-check-copy { flex: 1; }
+.af-check-head { display: flex; justify-content: space-between; gap: 12px; margin-bottom: 3px; }
+.af-check-title { font-size: 14px; font-weight: 600; margin: 0; }
+.af-check-state { font-size: 10px; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase; color: var(--af-faint); }
+.af-check-state.fail { color: var(--af-red); }
+.af-check-message { font-size: 13px; line-height: 1.45; color: var(--af-muted); margin: 0; }
+
+/* ── Result panel ──────────────────────────────────────── */
+.af-result-vendor { font-size: 25px; font-weight: 600; letter-spacing: -0.02em; margin: 14px 0 2px; }
+.af-result-amount { font-size: 31px; font-weight: 600; letter-spacing: -0.03em; margin: 0 0 6px; }
+.af-note {
+  border-left: 2px solid var(--af-line); padding: 2px 0 2px 14px;
+  font-size: 14px; line-height: 1.5; color: var(--af-muted); margin: 18px 0;
+}
+.af-note.warn { border-color: #ff9f0a; color: var(--af-ink); }
 .af-empty {
-  border: 1px dashed #cbd5e1; border-radius: 16px; padding: 2rem 1.4rem;
-  background: #f8fafc; color: #64748b; text-align: center;
+  border: 1px solid var(--af-line); border-radius: 20px;
+  padding: 58px 28px; text-align: center; color: var(--af-muted);
 }
-.af-empty h4 { color: #334155; margin: 0 0 0.4rem 0; }
-.af-meta { color: #64748b; font-size: 0.85rem; }
-div[data-testid="stMetricValue"] { font-size: 1.35rem; }
+.af-empty h3 { font-size: 21px; font-weight: 600; color: var(--af-ink); margin: 0 0 8px; }
+.af-empty p { font-size: 14px; line-height: 1.5; margin: 0; }
+
+/* ── Footer ────────────────────────────────────────────── */
+.af-footer {
+  border-top: 1px solid var(--af-line); margin-top: 64px; padding-top: 20px;
+  display: flex; justify-content: space-between; gap: 18px;
+  font-size: 12px; color: var(--af-faint);
+}
+.af-footer a { color: var(--af-muted); text-decoration: none; }
+.af-footer a:hover { color: var(--af-blue); }
+@media (max-width: 734px) {
+  .af-nav-right { gap: 14px; }
+  .af-nav-mode { display: none; }
+  .af-footer { flex-direction: column; }
+  .af-stage { padding: 28px 16px; }
+}
 </style>
 """
 
@@ -140,118 +300,100 @@ def _ledger() -> SessionFactory:
 
 
 def _inject_styles() -> None:
+    """Load the design system once per rerun."""
+
     st.markdown(_CSS, unsafe_allow_html=True)
 
 
+def _html(markup: str) -> None:
+    """Render trusted, dedented HTML without Markdown's code-block rules."""
+
+    st.markdown(dedent(markup).strip(), unsafe_allow_html=True)
+
+
 def _status_badge(status: AuditStatus) -> str:
-    """Return an HTML badge for a status, using fixed labels only."""
+    """Return a typographic status indicator (no icon fonts, no emoji)."""
 
     css_class, label = _STATUS_META[status]
-    return f'<span class="af-badge {css_class}">{label}</span>'
+    return f'<span class="af-status {css_class}"><span class="af-dot"></span>{label}</span>'
 
 
-def _render_header(runtime: dict[str, object]) -> None:
-    """Render the hero banner with the active extraction mode."""
+def _render_nav(runtime: dict[str, object]) -> None:
+    """Render the thin product navigation bar."""
 
-    if runtime["mode"] == "llm":
-        mode_label = "LLM mode"
-        mode_detail = str(runtime["model_name"])
-    else:
-        mode_label = "Demo mode"
-        mode_detail = "deterministic extractor · no API key needed"
-
-    st.markdown(
+    mode = (
+        "Demo mode"
+        if runtime["mode"] == "demo"
+        else html.escape(str(runtime["model_name"]))
+    )
+    _html(
         f"""
-        <div class="af-hero">
-          <div class="af-kicker">Human-in-the-loop · expense audit</div>
-          <div class="af-title">🧾 AuditFlow</div>
-          <div class="af-subtitle">
-            PydanticAI extracts. Deterministic tools decide. You sign off.
-          </div>
-          <span class="af-chip">{html.escape(mode_label)}</span>
-          <span class="af-chip muted">{html.escape(mode_detail)}</span>
-        </div>
-        """,
-        unsafe_allow_html=True,
+        <nav class="af-nav">
+          <span class="af-wordmark">AuditFlow</span>
+          <span class="af-nav-right">
+            <span class="af-nav-mode"><span class="af-dot"></span>{mode}</span>
+            <a href="{GITHUB_URL}" target="_blank" rel="noreferrer">GitHub</a>
+          </span>
+        </nav>
+        """
     )
 
 
-def _render_sidebar(factory: SessionFactory) -> None:
-    """Render policy, runtime and ledger controls."""
+def _render_hero() -> None:
+    """Render the product statement."""
 
-    runtime = describe_runtime()
-    counts = count_by_status(factory)
-    total = sum(counts.values())
+    _html(
+        f"""
+        <section class="af-hero">
+          <p class="af-eyebrow">Human-in-the-loop expense audit</p>
+          <h1>Expense audits,<br/>with a human in the loop.</h1>
+          <p class="af-lede">
+            AuditFlow reads a receipt, enforces company policy in Python,
+            and stops for review when the numbers need a person.
+          </p>
+          <div class="af-actions">
+            <a class="af-link" href="{GITHUB_URL}" target="_blank" rel="noreferrer">View the source</a>
+            <a class="af-link secondary" href="{GITHUB_URL}#readme" target="_blank" rel="noreferrer">Read the documentation</a>
+          </div>
+        </section>
+        """
+    )
 
-    with st.sidebar:
-        st.markdown("### ⚙️ Runtime")
-        if runtime["mode"] == "llm":
-            st.success(f"LLM extraction · `{runtime['model_name']}`")
-        else:
-            st.info("Demo mode · deterministic extractor")
-        st.caption(
-            "Add `OPENAI_API_KEY` or `ANTHROPIC_API_KEY` to `.env` to switch to "
-            "LLM extraction. Routing stays deterministic either way."
-        )
 
-        st.divider()
-        st.markdown("### 📋 Policy")
-        try:
-            policy = get_policy_summary()
-        except AuditFlowError as exc:
-            st.error(str(exc))
-            st.stop()
+def _render_stage() -> None:
+    """Render a quiet product shot of a paused audit."""
 
-        st.caption(f"{policy['company']} · policy v{policy['version']}")
-        st.metric(
-            "Auto-approval ceiling",
-            f"${policy['auto_approve_threshold']:,.0f}",
-            help="Invoices above this total always need a human decision.",
-        )
-        with st.expander("Category budgets"):
-            rows = [
-                {
-                    "Category": name.replace("_", " ").title(),
-                    "Limit": f"${config['budget_limit']:,.0f}",
-                }
-                for name, config in sorted(policy["categories"].items())
-            ]
-            st.dataframe(rows, hide_index=True)
+    _html(
+        """
+        <section class="af-stage" aria-label="Example audited invoice">
+          <div class="af-receipt">
+            <div class="af-receipt-top"><span>Invoice</span><span>CTG-88213</span></div>
+            <p class="af-receipt-vendor">Contoso Travel Group</p>
+            <p class="af-receipt-amount">$1,249.00</p>
+            <div class="af-receipt-rule"></div>
+            <div class="af-receipt-row"><span>Category</span><strong>Travel</strong></div>
+            <div class="af-receipt-row"><span>Category budget</span><strong class="over">$449 over</strong></div>
+            <div class="af-receipt-row"><span>Approved vendor</span><strong>Yes</strong></div>
+            <div class="af-receipt-status"><span class="af-dot"></span>Needs review</div>
+          </div>
+        </section>
+        """
+    )
 
-        st.divider()
-        st.markdown("### 🗂️ Ledger")
-        st.metric("Audits stored", total)
-        for status in (
-            AuditStatus.PENDING_REVIEW,
-            AuditStatus.AUTO_APPROVED,
-            AuditStatus.APPROVED,
-            AuditStatus.REJECTED,
-        ):
-            st.caption(f"{_STATUS_META[status][1]} · **{counts[status]}**")
 
-        with st.expander("Reset demo ledger"):
-            st.caption(
-                "Deletes every audit so the four samples can be replayed from a "
-                "clean slate. Policy files and receipts are untouched."
-            )
-            confirmed = st.checkbox(
-                "I understand this clears the audit history", key="reset_confirm"
-            )
-            if st.button(
-                "Reset ledger",
-                disabled=not confirmed,
-                key="reset_ledger_button",
-                type="secondary",
-            ):
-                removed = reset_ledger(factory)
-                for key in ("last_outcome", "suite_results", "queue_selection", "trace_selection"):
-                    st.session_state.pop(key, None)
-                st.toast(f"Removed {removed} audit(s) from the ledger.")
-                st.rerun()
+def _section(title: str, copy: str) -> None:
+    """Render a section heading in the page's voice."""
+
+    _html(
+        f"""
+        <p class="af-section-title">{html.escape(title)}</p>
+        <p class="af-section-copy">{html.escape(copy)}</p>
+        """
+    )
 
 
 def _sample_label(filename: str) -> str:
-    """Return a descriptive label for a bundled sample receipt."""
+    """Return a short, non-promotional label for a bundled sample."""
 
     return _SAMPLE_LABELS.get(filename, filename)
 
@@ -274,151 +416,153 @@ def _resolve_input(
 
 
 def _render_policy_checks(results: list[PolicyResult]) -> None:
-    """Render each deterministic guardrail with its raw payload."""
+    """Render the deterministic checks as a plain, scannable list."""
 
+    rows: list[str] = []
     for result in results:
-        icon = "✅" if result.passed else "❌"
-        with st.expander(
-            f"{icon} {result.title} · {result.status_label}",
-            expanded=not result.passed,
-        ):
-            st.write(result.message)
-            if result.policy_reference:
-                st.caption(f"Policy reference · `{result.policy_reference}`")
-            st.json(result.details, expanded=False)
+        state = "pass" if result.passed else "fail"
+        label = "Passed" if result.passed else "Failed"
+        rows.append(
+            '<div class="af-check">'
+            f'<span class="af-dot {state}"></span>'
+            '<div class="af-check-copy">'
+            '<div class="af-check-head">'
+            f'<p class="af-check-title">{html.escape(result.title)}</p>'
+            f'<span class="af-check-state {state}">{label}</span>'
+            "</div>"
+            f'<p class="af-check-message">{html.escape(result.message)}</p>'
+            "</div></div>"
+        )
+    _html(f'<div class="af-checks">{"".join(rows)}</div>')
 
 
 def _render_trace(steps: list[TraceStep], *, empty_message: str) -> None:
-    """Render the reasoning trace as expandable, inspectable steps."""
+    """Render the execution trace as numbered, inspectable rows."""
 
     if not steps:
         st.caption(empty_message)
         return
     for step in steps:
-        icon = _TRACE_ICONS.get(step.kind.value, "•")
         expanded = step.kind.value in {"routing", "human"}
         with st.expander(
-            f"{icon} {step.index + 1}. {step.name} · {step.kind.value}",
+            f"{step.index + 1:02d}   {step.name}",
             expanded=expanded,
         ):
-            st.write(step.summary)
-            meta: list[str] = []
+            meta = [
+                step.kind.value.upper(),
+                step.created_at.strftime("%H:%M:%S UTC"),
+            ]
             if step.duration_ms is not None:
-                meta.append(f"{step.duration_ms:.2f} ms")
-            meta.append(step.created_at.strftime("%H:%M:%S UTC"))
-            st.caption(" · ".join(meta))
-
+                meta.insert(1, f"{step.duration_ms:.1f} ms")
+            st.markdown(
+                f'<span class="af-label">{" · ".join(meta)}</span>',
+                unsafe_allow_html=True,
+            )
+            st.write(step.summary)
             input_col, output_col = st.columns(2)
             if step.inputs:
                 with input_col:
-                    st.caption("Inputs")
+                    st.caption("Input")
                     st.json(step.inputs, expanded=False)
             if step.outputs:
                 with output_col:
-                    st.caption("Outputs")
+                    st.caption("Output")
                     st.json(step.outputs, expanded=False)
 
 
 def _render_last_outcome(outcome: AuditOutcome | None) -> None:
-    """Render the most recent audit result in the upload tab."""
+    """Render the latest audit result."""
 
     if outcome is None:
-        st.markdown(
+        _html(
             """
             <div class="af-empty">
-              <h4>Your audit result appears here</h4>
-              <p>Pick a bundled sample (or upload your own receipt) and press
-              <strong>Run audit</strong>.</p>
-              <p>Clean invoices auto-approve. Flagged ones move to the review
-              queue with every policy result attached.</p>
+              <h3>No audit selected</h3>
+              <p>Choose a sample, upload a receipt or paste text, then run the audit.<br/>
+              Clean invoices settle automatically. Everything else stops here for a decision.</p>
             </div>
-            """,
-            unsafe_allow_html=True,
+            """
         )
         return
 
     invoice = outcome.invoice
-    st.markdown(_status_badge(outcome.status), unsafe_allow_html=True)
-    st.markdown(f"#### {html.escape(invoice.vendor)}")
-    st.markdown(
-        f"**{invoice.currency} {invoice.total_amount:,.2f}** "
-        f"· {invoice.date.isoformat()} "
-        f"· {invoice.category.replace('_', ' ').title()}"
-    )
-    source = html.escape(outcome.source)
-    audit_id = f"#{outcome.record_id}" if outcome.record_id else "not persisted"
-    st.markdown(
-        f'<span class="af-meta">Audit {audit_id} · {source} · '
-        f"{outcome.extraction_mode.value} extraction · "
-        f"{invoice.confidence_score:.0%} confidence</span>",
-        unsafe_allow_html=True,
+    audit_id = f"#{outcome.record_id}" if outcome.record_id else "not stored"
+    _html(
+        f"""
+        <div>
+          <p class="af-label">Latest audit</p>
+          {_status_badge(outcome.status)}
+          <p class="af-result-vendor">{html.escape(invoice.vendor)}</p>
+          <p class="af-result-amount">{invoice.currency} {invoice.total_amount:,.2f}</p>
+          <p class="af-meta">
+            {invoice.date.isoformat()} · {invoice.category.replace('_', ' ').title()}
+            · {invoice.confidence_score:.0%} confidence
+            · audit {audit_id} · {html.escape(outcome.source)}
+          </p>
+        </div>
+        """
     )
 
-    st.write("")
     if outcome.audit_flags:
-        st.warning(
-            "**Human review required.** Flags: "
-            + ", ".join(f"`{flag}`" for flag in outcome.audit_flags),
-            icon="⚠️",
+        flags = ", ".join(html.escape(flag.replace("_", " ").lower()) for flag in outcome.audit_flags)
+        _html(
+            f'<p class="af-note warn"><strong>Needs a human decision.</strong> {flags}.</p>'
         )
     else:
-        st.success(
-            "All deterministic checks passed and the total is inside the "
-            "auto-approval ceiling.",
-            icon="✅",
+        _html(
+            '<p class="af-note">All four checks passed and the total is inside '
+            "the auto-approval ceiling.</p>"
         )
 
-    st.markdown("##### Deterministic checks")
+    _html('<p class="af-label">Checks</p>')
     _render_policy_checks(outcome.policy_results)
-
-    with st.expander("Extracted invoice (JSON)"):
+    with st.expander("Invoice data"):
         st.json(invoice.model_dump(mode="json"), expanded=False)
 
 
 def _render_upload_tab(factory: SessionFactory) -> None:
     """Render receipt input and the latest audit summary."""
 
-    st.subheader("Upload, paste or test a sample")
-    st.caption(
-        "Priority: pasted text → uploaded file → bundled sample. "
-        "The duplicate sample is detected only after the clean sample exists in "
-        "the ledger."
+    _section(
+        "Audit a receipt",
+        "Paste text, upload a PDF, or start with a bundled sample. "
+        "Pasted text takes priority over an upload, which takes priority over the sample.",
     )
 
     samples = list_sample_receipts()
     samples_by_name = {path.name: path for path in samples}
     sample_names = sorted(samples_by_name)
-    selected_name = st.session_state.get("sample_choice", sample_names[0] if sample_names else "")
+    selected_name = st.session_state.get(
+        "sample_choice", sample_names[0] if sample_names else ""
+    )
     if selected_name not in samples_by_name and sample_names:
         selected_name = sample_names[0]
 
-    left, right = st.columns([1.05, 1.0], gap="large")
+    input_col, result_col = st.columns([1.05, 1.0], gap="large")
 
-    with left:
+    with input_col:
         if sample_names:
             choice = st.selectbox(
-                "Bundled sample receipt",
+                "Sample",
                 options=sample_names,
                 index=sample_names.index(selected_name),
                 format_func=lambda name: f"{_sample_label(name)} — {name}",
                 key="sample_choice",
             )
-            st.caption(f"`data/sample_receipts/{choice}`")
+            st.caption(f"data/sample_receipts/{choice}")
 
         uploaded = st.file_uploader(
-            "Upload a receipt",
+            "Receipt file",
             type=["pdf", "txt", "json", "md"],
-            help="PDFs are read with pypdf/pdfplumber. Text and JSON work offline.",
+            help="Text-based PDFs, plain text and JSON. Scanned images need OCR first.",
         )
         pasted = st.text_area(
-            "…or paste receipt text",
-            height=170,
+            "Or paste receipt text",
+            height=150,
             placeholder="Vendor: Northwind Cloud Services\nDate: 2026-10-14\nTotal: 89.00",
             key="paste_text",
         )
-        run_clicked = st.button(
-            "🚀 Run audit", type="primary", key="run_audit_button"
-        )
+        run_clicked = st.button("Run audit", type="primary", key="run_audit_button")
 
     if run_clicked:
         parsed, error = _resolve_input(
@@ -428,7 +572,7 @@ def _render_upload_tab(factory: SessionFactory) -> None:
             st.error(error)
         elif parsed is not None:
             try:
-                with st.spinner("Extracting, checking policy and routing…"):
+                with st.spinner("Extracting and checking policy…"):
                     outcome = run_audit(
                         parsed.text,
                         source=parsed.source,
@@ -443,26 +587,23 @@ def _render_upload_tab(factory: SessionFactory) -> None:
                 st.error(f"Unexpected error while auditing this receipt: {exc}")
             else:
                 st.session_state["last_outcome"] = outcome
-                st.toast(f"Routed to {outcome.status.value}")
 
-    with right:
+    with result_col:
         _render_last_outcome(st.session_state.get("last_outcome"))
 
     _render_demo_suite(factory, samples)
 
 
 def _render_demo_suite(factory: SessionFactory, samples: list[Path]) -> None:
-    """Run all four receipts in the documented order for a repeatable demo."""
+    """Run all four receipts in their documented order."""
 
-    st.write("")
-    with st.expander("▶️ Run the four-receipt evaluation in order"):
+    with st.expander("Run all four samples"):
         st.caption(
-            "Runs clean → over-limit → duplicate → unapproved vendor. Reset the "
-            "ledger first if you want the canonical four outcomes; otherwise the "
-            "duplicate detector may flag repeats of earlier receipts."
+            "Clean, over-limit, duplicate, blocked vendor. Reset the ledger first for "
+            "the canonical outcomes; otherwise repeat receipts are flagged as duplicates."
         )
-        if st.button("Run all samples", key="run_all_samples"):
-            progress = st.progress(0.0, text="Starting evaluation…")
+        if st.button("Run sample set", key="run_all_samples"):
+            progress = st.progress(0.0, text="Starting…")
             results: list[AuditOutcome] = []
             try:
                 for index, path in enumerate(samples, start=1):
@@ -482,7 +623,6 @@ def _render_demo_suite(factory: SessionFactory, samples: list[Path]) -> None:
             else:
                 st.session_state["suite_results"] = results
                 st.session_state["last_outcome"] = results[-1] if results else None
-                st.toast("Evaluation complete.")
             finally:
                 progress.empty()
 
@@ -513,92 +653,89 @@ def _format_timestamp(value: datetime | None) -> str:
 
 
 def _render_audit_identity(record: AuditRecord) -> None:
-    """Render the vendor, amount, status and provenance of an audit."""
+    """Render the identity and provenance of a stored audit."""
 
     invoice = record.invoice
-    st.markdown(_status_badge(record.status), unsafe_allow_html=True)
-    st.markdown(f"### {html.escape(invoice.vendor)}")
-    st.markdown(
-        f"**{invoice.currency} {invoice.total_amount:,.2f}** · "
-        f"{invoice.date.isoformat()} · "
-        f"{invoice.category.replace('_', ' ').title()}"
-    )
-    st.markdown(
-        f'<span class="af-meta">Audit #{record.id} · '
-        f"{html.escape(record.source)} · {record.extraction_mode.value} extraction · "
-        f"{_format_timestamp(record.created_at)}</span>",
-        unsafe_allow_html=True,
+    _html(
+        f"""
+        <div>
+          {_status_badge(record.status)}
+          <p class="af-result-vendor">{html.escape(invoice.vendor)}</p>
+          <p class="af-result-amount">{invoice.currency} {invoice.total_amount:,.2f}</p>
+          <p class="af-meta">
+            {invoice.date.isoformat()} · {invoice.category.replace('_', ' ').title()}
+            · {record.extraction_mode.value} extraction
+            · audit #{record.id} · {html.escape(record.source)}
+            · {_format_timestamp(record.created_at)}
+          </p>
+        </div>
+        """
     )
     if record.audit_flags:
-        st.warning(
-            "Flags: " + ", ".join(f"`{flag}`" for flag in record.audit_flags),
-            icon="⚠️",
-        )
+        flags = ", ".join(html.escape(flag.replace("_", " ").lower()) for flag in record.audit_flags)
+        _html(f'<p class="af-note warn"><strong>Flags.</strong> {flags}.</p>')
     if record.human_decision:
-        note = (
-            f" — \u201c{record.reviewer_note}\u201d" if record.reviewer_note else ""
-        )
-        st.info(
-            f"**{record.human_decision.value.title()}** by "
-            f"{record.reviewer or 'reviewer'} on "
-            f"{_format_timestamp(record.reviewed_at)}{note}",
-            icon="🧑‍⚖️",
+        note = f" — “{html.escape(record.reviewer_note)}”" if record.reviewer_note else ""
+        _html(
+            f'<p class="af-note"><strong>{record.human_decision.value.title()}</strong> '
+            f"by {html.escape(record.reviewer or 'reviewer')} on "
+            f"{_format_timestamp(record.reviewed_at)}{note}</p>"
         )
 
 
 def _render_review_queue(factory: SessionFactory) -> None:
-    """Render the human-in-the-loop approval queue."""
+    """Render the human review queue."""
 
-    st.subheader("Human review queue")
-    pending = list_audit_records(
-        factory, status=AuditStatus.PENDING_REVIEW, limit=200
+    _section(
+        "Review queue",
+        "Invoices that failed a check or exceeded the approval ceiling. "
+        "The agent is paused; your decision resumes or closes the workflow.",
     )
 
+    pending = list_audit_records(factory, status=AuditStatus.PENDING_REVIEW, limit=200)
     if not pending:
-        st.success(
-            "No invoices are waiting for review. Run the over-limit, duplicate "
-            "or blocked-vendor sample to populate the queue.",
-            icon="🎉",
+        _html(
+            """
+            <div class="af-empty">
+              <h3>Nothing to review</h3>
+              <p>Every invoice in the ledger is settled.<br/>
+              Run the over-limit, duplicate or blocked-vendor sample to create a review.</p>
+            </div>
+            """
         )
         return
-
-    st.caption(
-        f"{len(pending)} invoice(s) are paused mid-workflow. Extraction and policy "
-        "results are frozen until you approve or reject them."
-    )
 
     labels = {
         f"#{record.id} · {record.invoice.vendor} · "
         f"{record.invoice.currency} {record.invoice.total_amount:,.2f}": record
         for record in pending
     }
-    selected = st.selectbox("Flagged invoice", options=list(labels))
+    selected = st.selectbox("Invoice", options=list(labels))
     record = labels[selected]
 
-    invoice_col, decision_col = st.columns([1.0, 1.05], gap="large")
+    detail_col, decision_col = st.columns([1.0, 1.05], gap="large")
 
-    with invoice_col:
+    with detail_col:
         _render_audit_identity(record)
-        st.markdown("##### Extracted invoice")
-        st.json(record.invoice.model_dump(mode="json"), expanded=False)
-        st.markdown("##### Deterministic checks")
+        _html('<p class="af-label" style="margin-top:26px">Checks</p>')
         _render_policy_checks(record.policy_results)
+        with st.expander("Invoice data"):
+            st.json(record.invoice.model_dump(mode="json"), expanded=False)
 
     with decision_col:
-        st.markdown("##### Reasoning trace")
+        _html('<p class="af-label">Trace</p>')
         _render_trace(record.trace, empty_message="No trace was recorded.")
 
-        st.divider()
-        st.markdown("##### Record your decision")
+        _html('<p class="af-label" style="margin-top:26px">Decision</p>')
         st.caption(
-            "Approving resumes the workflow; rejecting closes it. Either way the "
-            "decision is appended to the audit trace and cannot be changed again."
+            "Approving resumes the workflow. Rejecting closes it. "
+            "Either way the decision is appended to the audit trace and cannot be changed again."
         )
         note = st.text_area(
-            "Reviewer note (optional)",
+            "Note (optional)",
             key=f"decision_note_{record.id}",
-            height=90,
-            placeholder="e.g. Manager pre-approval confirmed for the Q4 summit.",
+            height=84,
+            placeholder="Manager pre-approval confirmed.",
         )
         reviewer = st.text_input(
             "Reviewer",
@@ -609,11 +746,9 @@ def _render_review_queue(factory: SessionFactory) -> None:
 
         approve_col, reject_col = st.columns(2)
         approve = approve_col.button(
-            "✅ Approve",
-            type="primary",
-            key=f"approve_{record.id}",
+            "Approve", type="primary", key=f"approve_{record.id}"
         )
-        reject = reject_col.button("⛔ Reject", key=f"reject_{record.id}")
+        reject = reject_col.button("Reject", key=f"reject_{record.id}")
 
         if approve or reject:
             clean_reviewer = reviewer.strip() or "human-reviewer"
@@ -634,23 +769,28 @@ def _render_review_queue(factory: SessionFactory) -> None:
                 except InvalidStateTransition as exc:
                     st.error(str(exc))
                 else:
-                    st.toast(
-                        f"Audit #{record.id} moved to {updated.status.value}.",
-                        icon="✅" if approve else "⛔",
-                    )
+                    st.toast(f"Audit #{record.id} moved to {updated.status.value.lower()}.")
                     st.rerun()
 
 
 def _render_trace_inspector(factory: SessionFactory) -> None:
-    """Render the audit trace inspector for any stored record."""
+    """Render the audit trace inspector."""
 
-    st.subheader("Audit trace inspector")
+    _section(
+        "Trace",
+        "Every extraction, tool call and decision, stored with the audit. "
+        "Tool payloads are the exact values used for routing.",
+    )
+
     records = list_audit_records(factory, limit=200)
     if not records:
-        st.info(
-            "No audits yet. Run a receipt from the Upload tab and its full "
-            "reasoning trace will appear here.",
-            icon="🔍",
+        _html(
+            """
+            <div class="af-empty">
+              <h3>No audits yet</h3>
+              <p>Run a receipt from the audit tab and its trace will appear here.</p>
+            </div>
+            """
         )
         return
 
@@ -659,7 +799,7 @@ def _render_trace_inspector(factory: SessionFactory) -> None:
         f"{record.invoice.currency} {record.invoice.total_amount:,.2f}": record
         for record in records
     }
-    selected = st.selectbox("Audit record", options=list(labels))
+    selected = st.selectbox("Audit", options=list(labels))
     record = labels[selected]
 
     _render_audit_identity(record)
@@ -670,34 +810,103 @@ def _render_trace_inspector(factory: SessionFactory) -> None:
         "Total", f"{record.invoice.currency} {record.invoice.total_amount:,.2f}"
     )
     metric_cols[1].metric(
-        "Extraction confidence", f"{record.invoice.confidence_score:.0%}"
+        "Confidence", f"{record.invoice.confidence_score:.0%}"
     )
     metric_cols[2].metric("Failed checks", len(failed))
     metric_cols[3].metric("Trace steps", len(record.trace))
 
     st.download_button(
-        "⬇️ Download audit JSON",
+        "Download audit JSON",
         data=json.dumps(record.model_dump(mode="json"), indent=2),
         file_name=f"auditflow-audit-{record.id}.json",
         mime="application/json",
         key=f"download_audit_{record.id}",
     )
 
-    trace_tab, checks_tab, invoice_tab, raw_tab = st.tabs(
-        ["🧠 Trace timeline", "🛡️ Policy results", "📄 Extracted invoice", "🧾 Raw record"]
+    timeline, checks, invoice_tab, raw = st.tabs(
+        ["Timeline", "Policy", "Invoice", "Record"]
     )
-    with trace_tab:
-        st.caption(
-            "Every step the workflow executed, in order. Tool outputs are the "
-            "exact deterministic payloads used for routing."
-        )
+    with timeline:
         _render_trace(record.trace, empty_message="No trace was recorded.")
-    with checks_tab:
+    with checks:
         _render_policy_checks(record.policy_results)
     with invoice_tab:
         st.json(record.invoice.model_dump(mode="json"), expanded=False)
-    with raw_tab:
+    with raw:
         st.json(record.model_dump(mode="json"), expanded=False)
+
+
+def _render_system_section(
+    factory: SessionFactory, policy: dict[str, object], counts: dict[AuditStatus, int]
+) -> None:
+    """Render policy, ledger counts and the demo reset control."""
+
+    with st.expander("Policy, ledger and reset"):
+        policy_col, ledger_col = st.columns([1.15, 1.0], gap="large")
+
+        with policy_col:
+            _html(
+                f"""
+                <p class="af-label">Policy</p>
+                <p class="af-meta">{html.escape(str(policy['company']))} · version {html.escape(str(policy['version']))}
+                · ceiling ${float(policy['auto_approve_threshold']):,.0f}</p>
+                """
+            )
+            categories = policy["categories"]
+            st.dataframe(
+                [
+                    {
+                        "Category": name.replace("_", " ").title(),
+                        "Limit": f"${float(config['budget_limit']):,.0f}",
+                    }
+                    for name, config in sorted(categories.items())
+                ],
+                hide_index=True,
+            )
+
+        with ledger_col:
+            _html('<p class="af-label">Ledger</p>')
+            metric_cols = st.columns(2)
+            metric_cols[0].metric("Needs review", counts[AuditStatus.PENDING_REVIEW])
+            metric_cols[1].metric("Auto-approved", counts[AuditStatus.AUTO_APPROVED])
+            metric_cols = st.columns(2)
+            metric_cols[0].metric("Approved", counts[AuditStatus.APPROVED])
+            metric_cols[1].metric("Rejected", counts[AuditStatus.REJECTED])
+
+            confirmed = st.checkbox(
+                "Clear the audit history", key="reset_confirm"
+            )
+            if st.button(
+                "Reset ledger",
+                disabled=not confirmed,
+                key="reset_ledger_button",
+            ):
+                removed = reset_ledger(factory)
+                for key in (
+                    "last_outcome",
+                    "suite_results",
+                    "queue_selection",
+                    "trace_selection",
+                ):
+                    st.session_state.pop(key, None)
+                st.toast(f"Removed {removed} audits.")
+                st.rerun()
+
+
+def _render_footer(policy: dict[str, object]) -> None:
+    """Render the page footer."""
+
+    _html(
+        f"""
+        <footer class="af-footer">
+          <span>AuditFlow · MIT License · {html.escape(str(policy['company']))}</span>
+          <span>
+            PydanticAI, FastAPI and Streamlit ·
+            <a href="{GITHUB_URL}" target="_blank" rel="noreferrer">GitHub</a>
+          </span>
+        </footer>
+        """
+    )
 
 
 def main() -> None:
@@ -710,23 +919,31 @@ def main() -> None:
         st.error(f"Could not open the AuditFlow ledger: {exc}")
         st.stop()
 
-    counts = count_by_status(factory)
-    _render_sidebar(factory)
-    _render_header(describe_runtime())
+    try:
+        policy = get_policy_summary()
+    except AuditFlowError as exc:
+        st.error(str(exc))
+        st.stop()
 
-    upload_tab, queue_tab, trace_tab = st.tabs(
-        [
-            "📥 Upload / Test Sample",
-            f"🧑‍⚖️ Human Review Queue ({counts[AuditStatus.PENDING_REVIEW]})",
-            "🔍 Audit Trace Inspector",
-        ]
+    runtime = describe_runtime()
+    counts = count_by_status(factory)
+
+    _render_nav(runtime)
+    _render_hero()
+    _render_stage()
+
+    audit_tab, review_tab, trace_tab = st.tabs(
+        ["Audit", f"Review ({counts[AuditStatus.PENDING_REVIEW]})", "Trace"]
     )
-    with upload_tab:
+    with audit_tab:
         _render_upload_tab(factory)
-    with queue_tab:
+    with review_tab:
         _render_review_queue(factory)
     with trace_tab:
         _render_trace_inspector(factory)
+
+    _render_system_section(factory, policy, counts)
+    _render_footer(policy)
 
 
 if __name__ == "__main__":
