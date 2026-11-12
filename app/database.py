@@ -11,6 +11,7 @@ dashboard, the FastAPI app and the test suite can share a file safely.
 
 from __future__ import annotations
 
+import math
 import os
 from contextlib import contextmanager
 from datetime import date as DateType
@@ -19,7 +20,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Iterator
 
-from sqlalchemy import Engine, create_engine, event, func, select
+from sqlalchemy import Engine, create_engine, delete, event, func, select
 from sqlalchemy.orm import (
     DeclarativeBase,
     Mapped,
@@ -35,9 +36,13 @@ from app.models import (
     AuditStatus,
     ExtractionMode,
     HumanDecision,
+    InvalidStateTransition,
     InvoiceData,
     PolicyResult,
+    ReviewDecision,
+    TraceKind,
     TraceStep,
+    normalise_vendor_name,
 )
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -46,6 +51,17 @@ DEFAULT_DATABASE_FILENAME = "auditflow.db"
 #: Defaults mirroring ``data/policies.json``; callers pass policy values when available.
 DEFAULT_LOOKBACK_DAYS = 180
 DEFAULT_AMOUNT_TOLERANCE = 0.01
+
+#: Valid human decisions for each non-terminal status. Terminal records are frozen.
+ALLOWED_TRANSITIONS: dict[AuditStatus, frozenset[AuditStatus]] = {
+    AuditStatus.PENDING_REVIEW: frozenset(
+        {AuditStatus.APPROVED, AuditStatus.REJECTED}
+    ),
+    # A reviewer may confirm or overturn an automatic approval, but only once.
+    AuditStatus.AUTO_APPROVED: frozenset(
+        {AuditStatus.APPROVED, AuditStatus.REJECTED}
+    ),
+}
 
 #: SQLAlchemy session factory type used across the application.
 SessionFactory = sessionmaker[Session]
@@ -350,3 +366,160 @@ def count_by_status(factory: SessionFactory) -> dict[AuditStatus, int]:
         for raw_status, count in session.execute(stmt):
             counts[AuditStatus(raw_status)] = int(count)
     return counts
+
+
+def find_duplicate_invoice(
+    factory: SessionFactory,
+    *,
+    vendor: str,
+    invoice_date: DateType | str,
+    total_amount: float,
+    exclude_id: int | None = None,
+    lookback_days: int = DEFAULT_LOOKBACK_DAYS,
+    amount_tolerance: float = DEFAULT_AMOUNT_TOLERANCE,
+) -> AuditRecord | None:
+    """Find an earlier non-rejected audit for the same vendor, date and amount.
+
+    Vendor names are compared with :func:`app.models.normalise_vendor_name`, so
+    legal suffixes and punctuation do not hide a resubmission. Rejected invoices
+    are ignored: a vendor may legitimately re-bill after a rejection is resolved.
+
+    Args:
+        factory: Session factory for the target database.
+        vendor: Vendor name on the invoice under review.
+        invoice_date: Invoice date (ISO string or ``date``).
+        total_amount: Invoice total in the policy base currency.
+        exclude_id: Record id to ignore (the invoice being re-audited).
+        lookback_days: Only consider audits created within this many days.
+        amount_tolerance: Absolute amount difference considered equal.
+
+    Returns:
+        The matching record, or ``None`` when this invoice is new.
+
+    Raises:
+        ValueError: If the amount, date or lookback window is invalid.
+    """
+
+    if lookback_days < 1:
+        raise ValueError("lookback_days must be at least 1")
+    if amount_tolerance < 0:
+        raise ValueError("amount_tolerance must be non-negative")
+    if not math.isfinite(total_amount) or total_amount <= 0:
+        raise ValueError("total_amount must be a positive, finite number")
+
+    parsed_date = _coerce_date(invoice_date)
+    cutoff = _utcnow() - timedelta(days=lookback_days)
+
+    stmt = (
+        select(AuditRecordRow)
+        .where(
+            AuditRecordRow.invoice_date == parsed_date,
+            AuditRecordRow.status != AuditStatus.REJECTED.value,
+            AuditRecordRow.total_amount >= total_amount - amount_tolerance,
+            AuditRecordRow.total_amount <= total_amount + amount_tolerance,
+            AuditRecordRow.created_at >= cutoff,
+        )
+        .order_by(AuditRecordRow.created_at.asc(), AuditRecordRow.id.asc())
+    )
+    if exclude_id is not None:
+        stmt = stmt.where(AuditRecordRow.id != exclude_id)
+
+    target_vendor = normalise_vendor_name(vendor)
+    with session_scope(factory) as session:
+        rows = session.scalars(stmt).all()
+        for row in rows:
+            if normalise_vendor_name(row.vendor) == target_vendor:
+                return _row_to_record(row)
+    return None
+
+
+def apply_human_decision(
+    factory: SessionFactory, record_id: int, decision: ReviewDecision
+) -> AuditRecord:
+    """Apply an approve/reject decision and append it to the audit trace.
+
+    Args:
+        factory: Session factory for the target database.
+        record_id: Audit to decide on.
+        decision: Reviewer action, optional note and reviewer identity.
+
+    Returns:
+        The updated record with a ``human_decision`` trace step.
+
+    Raises:
+        LookupError: If the audit does not exist.
+        InvalidStateTransition: If the current status does not allow the
+            requested decision (for example, deciding twice).
+    """
+
+    target_status = AuditStatus(decision.decision.value)
+
+    with session_scope(factory) as session:
+        row = session.get(AuditRecordRow, record_id)
+        if row is None:
+            raise LookupError(f"Audit record {record_id} was not found.")
+
+        current_status = AuditStatus(row.status)
+        allowed = ALLOWED_TRANSITIONS.get(current_status, frozenset())
+        if target_status not in allowed:
+            allowed_label = ", ".join(sorted(status.value for status in allowed)) or "none"
+            raise InvalidStateTransition(
+                f"Cannot record {target_status.value} for audit #{record_id} while it "
+                f"is {current_status.value}. Allowed transitions: {allowed_label}."
+            )
+
+        now = _utcnow()
+        trace = list(row.trace or [])
+        step = TraceStep(
+            index=len(trace),
+            kind=TraceKind.HUMAN,
+            name="human_decision",
+            summary=(
+                f"{decision.reviewer} recorded {decision.decision.value} for "
+                f"{row.vendor}."
+            ),
+            inputs={
+                "decision": decision.decision.value,
+                "reviewer": decision.reviewer,
+                "note": decision.note,
+            },
+            outputs={"status": target_status.value, "record_id": record_id},
+            created_at=now,
+        )
+
+        row.status = target_status.value
+        row.human_decision = decision.decision.value
+        row.reviewer = decision.reviewer
+        row.reviewer_note = decision.note
+        row.reviewed_at = now
+        row.updated_at = now
+        row.trace = trace + [step.model_dump(mode="json")]
+
+        return _row_to_record(row)
+
+
+def reset_ledger(factory: SessionFactory) -> int:
+    """Delete every audit row and return the number removed.
+
+    Intended for the dashboard's demo reset button and for test fixtures. It
+    never touches ``data/policies.json`` or the receipt samples.
+    """
+
+    with session_scope(factory) as session:
+        result = session.execute(delete(AuditRecordRow))
+        return int(result.rowcount or 0)
+
+
+def _coerce_date(value: DateType | str) -> DateType:
+    """Parse an ISO date string, passing through ``date`` instances."""
+
+    if isinstance(value, datetime):
+        return value.date()
+    if isinstance(value, DateType):
+        return value
+    try:
+        return DateType.fromisoformat(str(value).strip())
+    except ValueError as exc:
+        raise ValueError(
+            f"Invalid invoice date {value!r}; expected ISO format YYYY-MM-DD."
+        ) from exc
