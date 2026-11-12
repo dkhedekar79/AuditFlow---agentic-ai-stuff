@@ -1,0 +1,15 @@
+NORTHWIND CLOUD SERVICES
+Invoice NWC-2026-10442
+
+Vendor: Northwind Cloud Services
+Date: 2026-10-14
+Currency: USD
+Category: Software
+Total: 89.00
+
+Line items:
+1 x Team plan seat @ 49.00 = 49.00
+1 x Audit log add-on @ 40.00 = 40.00
+
+Payment terms: Net 30
+Bill to: Northwind Robotics, Inc. — Accounts Payable
