@@ -29,16 +29,20 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
+from dotenv import load_dotenv
 from pydantic import ValidationError
 from pydantic_ai import Agent, RunContext
 
 from app import tools
-from app.database import SessionFactory
+from app.database import SessionFactory, create_audit_record, get_session_factory
 from app.models import (
+    AuditOutcome,
+    AuditStatus,
     ExtractionMode,
     InvoiceData,
     InvoiceExtractionError,
     LineItem,
+    PolicyResult,
     TraceKind,
     TraceStep,
 )
@@ -46,6 +50,10 @@ from app.models import (
 logger = logging.getLogger(__name__)
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
+
+# Load .env once for the dashboard, API and tests. Real environment variables win,
+# so CI and container deployments can override anything without editing files.
+load_dotenv(PROJECT_ROOT / ".env", override=False)
 
 DEFAULT_OPENAI_MODEL = "openai:gpt-4o-mini"
 DEFAULT_ANTHROPIC_MODEL = "anthropic:claude-3-5-sonnet-latest"
@@ -821,3 +829,357 @@ def _is_truthy(value: str | None) -> bool:
     """Interpret common boolean environment strings."""
 
     return bool(value) and value.strip().lower() in _TRUTHY
+
+
+#: Audit flags raised for each failed deterministic check.
+FLAG_BY_CHECK: dict[str, str] = {
+    "budget_limit": "BUDGET_LIMIT_EXCEEDED",
+    "approved_vendor": "UNAPPROVED_VENDOR",
+    "duplicate_invoice": "DUPLICATE_INVOICE",
+    "auto_approve_threshold": "OVER_AUTO_APPROVAL_THRESHOLD",
+}
+
+_CHECK_TITLES: dict[str, str] = {
+    "budget_limit": "Category budget",
+    "approved_vendor": "Approved vendor",
+    "duplicate_invoice": "Duplicate invoice",
+    "auto_approve_threshold": "Auto-approval threshold",
+}
+
+_CHECK_SEVERITIES: dict[str, str] = {
+    "budget_limit": "critical",
+    "approved_vendor": "critical",
+    "duplicate_invoice": "critical",
+    "auto_approve_threshold": "warning",
+}
+
+
+def run_policy_checks(
+    invoice: InvoiceData,
+    *,
+    session_factory: SessionFactory,
+    collector: TraceCollector | None = None,
+) -> list[PolicyResult]:
+    """Run every deterministic guardrail against an extracted invoice.
+
+    This is the authoritative decision input. The same four checks run in demo
+    and LLM mode, so routing never depends on the model behaving well.
+
+    Args:
+        invoice: Validated invoice under review.
+        session_factory: Ledger used for duplicate detection.
+        collector: Optional trace collector for tool-call visibility.
+
+    Returns:
+        One :class:`~app.models.PolicyResult` per guardrail, in evaluation order.
+    """
+
+    policies = tools.load_policies()
+    results: list[PolicyResult] = []
+
+    started = time.perf_counter()
+    budget = tools.check_budget_limit(
+        invoice.category, invoice.total_amount, policies=policies
+    )
+    _trace_tool_call(
+        collector,
+        name="policy.check_budget_limit",
+        payload=budget,
+        inputs={"category": invoice.category, "amount": invoice.total_amount},
+        started=started,
+    )
+    results.append(
+        PolicyResult(
+            check="budget_limit",
+            title=_CHECK_TITLES["budget_limit"],
+            passed=bool(budget["passed"]),
+            severity=_CHECK_SEVERITIES["budget_limit"],
+            message=budget["message"],
+            details=budget,
+            policy_reference=budget.get("policy_reference"),
+        )
+    )
+
+    started = time.perf_counter()
+    vendor = tools.verify_approved_vendor(invoice.vendor, policies=policies)
+    _trace_tool_call(
+        collector,
+        name="policy.verify_approved_vendor",
+        payload=vendor,
+        inputs={"vendor": invoice.vendor},
+        started=started,
+    )
+    results.append(
+        PolicyResult(
+            check="approved_vendor",
+            title=_CHECK_TITLES["approved_vendor"],
+            passed=bool(vendor["passed"]),
+            severity=_CHECK_SEVERITIES["approved_vendor"],
+            message=vendor["message"],
+            details=vendor,
+            policy_reference=vendor.get("policy_reference"),
+        )
+    )
+
+    started = time.perf_counter()
+    duplicate = tools.duplicate_check(
+        invoice.vendor,
+        invoice.date.isoformat(),
+        invoice.total_amount,
+        policies=policies,
+        session_factory=session_factory,
+    )
+    _trace_tool_call(
+        collector,
+        name="policy.check_duplicate_invoice",
+        payload=duplicate,
+        inputs={
+            "vendor": invoice.vendor,
+            "date": invoice.date.isoformat(),
+            "amount": invoice.total_amount,
+        },
+        started=started,
+    )
+    results.append(
+        PolicyResult(
+            check="duplicate_invoice",
+            title=_CHECK_TITLES["duplicate_invoice"],
+            passed=bool(duplicate["passed"]),
+            severity=_CHECK_SEVERITIES["duplicate_invoice"],
+            message=duplicate["message"],
+            details=duplicate,
+            policy_reference=duplicate.get("policy_reference"),
+        )
+    )
+
+    started = time.perf_counter()
+    threshold = tools.check_auto_approve_threshold(
+        invoice.total_amount, policies=policies
+    )
+    _trace_tool_call(
+        collector,
+        name="policy.check_auto_approve_threshold",
+        payload=threshold,
+        inputs={"amount": invoice.total_amount},
+        started=started,
+    )
+    results.append(
+        PolicyResult(
+            check="auto_approve_threshold",
+            title=_CHECK_TITLES["auto_approve_threshold"],
+            passed=bool(threshold["passed"]),
+            severity=_CHECK_SEVERITIES["auto_approve_threshold"],
+            message=threshold["message"],
+            details=threshold,
+            policy_reference=threshold.get("policy_reference"),
+        )
+    )
+
+    return results
+
+
+def decide_status(policy_results: list[PolicyResult]) -> tuple[AuditStatus, list[str]]:
+    """Route an invoice from deterministic results.
+
+    Any failed check — budget, vendor, duplicate or the $500 auto-approval
+    threshold — pauses the workflow in ``PENDING_REVIEW``. Only a clean sweep is
+    auto-approved.
+    """
+
+    flags = [
+        FLAG_BY_CHECK[result.check]
+        for result in policy_results
+        if not result.passed and result.check in FLAG_BY_CHECK
+    ]
+    status = AuditStatus.PENDING_REVIEW if flags else AuditStatus.AUTO_APPROVED
+    return status, flags
+
+
+def run_audit(
+    raw_text: str,
+    *,
+    source: str = "manual-upload",
+    session_factory: SessionFactory | None = None,
+    extraction_mode: Literal["auto", "llm", "heuristic"] | str = "auto",
+    persist: bool = True,
+    collector: TraceCollector | None = None,
+) -> AuditOutcome:
+    """Run the full audit workflow for one receipt and persist the result.
+
+    Flow: validate input → extract (LLM or deterministic) → run guardrails →
+    route → write the audit and its trace to SQLite. Flagged invoices stop in
+    ``PENDING_REVIEW`` until a human records a decision via the UI or API.
+
+    Args:
+        raw_text: Normalised receipt text.
+        source: Filename or label stored with the audit.
+        session_factory: Optional session factory (defaults to the app ledger).
+        extraction_mode: ``"auto"``, ``"llm"`` or ``"heuristic"``.
+        persist: Set ``False`` for dry runs that should not touch the ledger.
+        collector: Optional collector to append to (useful in tests).
+
+    Returns:
+        The audit outcome, including ``record_id`` when persisted.
+
+    Raises:
+        InvoiceExtractionError: If the receipt cannot be extracted.
+        ValueError: If the receipt text is empty or the mode is unknown.
+    """
+
+    if not isinstance(raw_text, str) or not raw_text.strip():
+        raise InvoiceExtractionError("No receipt text was provided.")
+
+    factory = session_factory or get_session_factory()
+    mode = resolve_extraction_mode(extraction_mode)
+    model_name = resolve_model_name() if mode is ExtractionMode.LLM else None
+    trace = collector or TraceCollector()
+    clean_source = (source or "manual-upload").strip()[:255] or "manual-upload"
+
+    configure_observability()
+    trace.add(
+        kind=TraceKind.SYSTEM,
+        name="audit_started",
+        summary=(
+            f"Auditing '{clean_source}' with "
+            f"{model_name or 'the deterministic demo extractor'}."
+        ),
+        inputs={
+            "source": clean_source,
+            "extraction_mode": mode.value,
+            "model": model_name,
+            "receipt_chars": len(raw_text),
+        },
+    )
+
+    if mode is ExtractionMode.LLM:
+        try:
+            invoice = _extract_with_llm(
+                raw_text,
+                model_name=model_name or DEFAULT_OPENAI_MODEL,
+                deps=AuditDeps(session_factory=factory, collector=trace),
+                source=clean_source,
+            )
+        except InvoiceExtractionError as exc:
+            if _is_truthy(os.getenv("AUDITFLOW_STRICT_LLM")):
+                raise
+            logger.warning("LLM extraction failed; using demo extractor: %s", exc)
+            trace.add(
+                kind=TraceKind.SYSTEM,
+                name="llm_fallback",
+                summary="LLM extraction failed; fell back to the deterministic extractor.",
+                outputs={"error": str(exc)[:500]},
+            )
+            invoice = _extract_heuristically_with_trace(
+                raw_text, trace=trace, reason="LLM fallback"
+            )
+    else:
+        invoice = _extract_heuristically_with_trace(raw_text, trace=trace)
+
+    policy_results = run_policy_checks(
+        invoice, session_factory=factory, collector=trace
+    )
+    failed = [result for result in policy_results if not result.passed]
+    trace.add(
+        kind=TraceKind.POLICY,
+        name="guardrail_evaluation",
+        summary=(
+            f"{len(policy_results) - len(failed)}/{len(policy_results)} deterministic "
+            f"checks passed."
+        ),
+        outputs={
+            "failed_checks": [result.check for result in failed],
+            "results": [
+                result.model_dump(mode="json") for result in policy_results
+            ],
+        },
+    )
+
+    status, audit_flags = decide_status(policy_results)
+    trace.add(
+        kind=TraceKind.ROUTING,
+        name="routing_decision",
+        summary=(
+            f"Routed to {status.value}"
+            + (
+                f" with flags: {', '.join(audit_flags)}."
+                if audit_flags
+                else " with no audit flags."
+            )
+        ),
+        inputs={
+            "failed_checks": [result.check for result in failed],
+        },
+        outputs={"status": status.value, "audit_flags": audit_flags},
+    )
+
+    outcome = AuditOutcome(
+        invoice=invoice,
+        policy_results=policy_results,
+        audit_flags=audit_flags,
+        status=status,
+        trace=trace.steps,
+        extraction_mode=mode,
+        model_name=model_name,
+        source=clean_source,
+    )
+
+    if not persist:
+        return outcome
+
+    record = create_audit_record(factory, outcome)
+    return outcome.model_copy(update={"record_id": record.id})
+
+
+def _extract_heuristically_with_trace(
+    raw_text: str, *, trace: TraceCollector, reason: str | None = None
+) -> InvoiceData:
+    """Run the deterministic extractor and record the step in the trace."""
+
+    started = time.perf_counter()
+    try:
+        invoice = extract_invoice_heuristically(raw_text)
+    except InvoiceExtractionError as exc:
+        trace.add(
+            kind=TraceKind.EXTRACTION,
+            name="extraction_failed",
+            summary=f"Deterministic extraction failed: {exc}",
+            outputs={"error": str(exc)[:500]},
+        )
+        raise
+
+    label = "demo extractor" if not reason else f"demo extractor ({reason})"
+    trace.add(
+        kind=TraceKind.EXTRACTION,
+        name="heuristic_extraction",
+        summary=(
+            f"{label.capitalize()} parsed {invoice.vendor} for "
+            f"{invoice.total_amount:,.2f} {invoice.currency} with "
+            f"{invoice.confidence_score:.0%} confidence."
+        ),
+        inputs={"receipt_preview": _preview(raw_text), "reason": reason},
+        outputs={"invoice": invoice.model_dump(mode="json")},
+        duration_ms=(time.perf_counter() - started) * 1000,
+    )
+    return invoice
+
+
+def _trace_tool_call(
+    collector: TraceCollector | None,
+    *,
+    name: str,
+    payload: dict[str, Any],
+    inputs: dict[str, Any],
+    started: float,
+) -> None:
+    """Record a deterministic tool call when a collector is present."""
+
+    if collector is None:
+        return
+    collector.add(
+        kind=TraceKind.TOOL,
+        name=name,
+        summary=str(payload.get("message", name)),
+        inputs=inputs,
+        outputs=payload,
+        duration_ms=(time.perf_counter() - started) * 1000,
+    )
