@@ -1,0 +1,18 @@
+{
+  "receipt_type": "invoice",
+  "vendor": "QuickCash Gadgets Ltd",
+  "invoice_number": "QCG-0091",
+  "date": "2026-11-06",
+  "currency": "USD",
+  "category": "office_supplies",
+  "total_amount": 249.0,
+  "line_items": [
+    {
+      "description": "USB-C docking stations",
+      "quantity": 3,
+      "unit_price": 83.0,
+      "amount": 249.0
+    }
+  ],
+  "notes": "One-off desk setup purchase for two new starters. Vendor was sourced through a marketplace listing."
+}
