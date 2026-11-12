@@ -1,0 +1,337 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <meta name="theme-color" content="#fbfbfd">
+  <title>AuditFlow — Expense audits, with a human in the loop</title>
+  <meta name="description" content="AuditFlow reads a receipt, enforces company policy in Python, and pauses for human review when the numbers need a person.">
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <a class="skip-link" href="#main">Skip to content</a>
+
+  <header class="site-nav">
+    <div class="nav-inner">
+      <a class="wordmark" href="#top">AuditFlow</a>
+      <nav aria-label="Primary">
+        <a href="#overview">Overview</a>
+        <a href="#workflow">Workflow</a>
+        <a href="#demo">Demo</a>
+        <a href="#policy">Policy</a>
+        <a class="nav-github" href="https://github.com/dkhedekar79/AuditFlow---agentic-ai-stuff">GitHub</a>
+      </nav>
+    </div>
+  </header>
+
+  <main id="main">
+    <section class="hero" id="top">
+      <div class="inner">
+        <p class="eyebrow">Human-in-the-loop expense audit</p>
+        <h1>Expense audits,<br>with a human in the loop.</h1>
+        <p class="lede">
+          AuditFlow reads a receipt, enforces company policy in Python,
+          and stops for review when the numbers need a person.
+        </p>
+        <div class="hero-actions">
+          <a class="link-arrow" href="#demo">Try the demo</a>
+          <a class="link-quiet" href="https://github.com/dkhedekar79/AuditFlow---agentic-ai-stuff">View the source</a>
+        </div>
+      </div>
+      <div class="hero-shot">
+        <div class="receipt-card" role="img" aria-label="Example invoice from Contoso Travel Group for 1,249 dollars, flagged for review because it is over the travel budget.">
+          <div class="receipt-top"><span>Invoice</span><span>CTG-88213</span></div>
+          <p class="receipt-vendor">Contoso Travel Group</p>
+          <p class="receipt-amount">$1,249.00</p>
+          <div class="receipt-rule"></div>
+          <div class="receipt-row"><span>Category</span><strong>Travel</strong></div>
+          <div class="receipt-row"><span>Category budget</span><strong class="over">$449 over</strong></div>
+          <div class="receipt-row"><span>Approval ceiling</span><strong>$500</strong></div>
+          <div class="receipt-status"><span class="dot"></span>Needs review</div>
+        </div>
+      </div>
+    </section>
+
+    <section class="statement">
+      <div class="inner">
+        <p>The model reads.<br>Python decides.<br><span>You approve.</span></p>
+      </div>
+    </section>
+
+    <section class="section" id="overview">
+      <div class="inner">
+        <div class="section-head">
+          <p class="eyebrow">Three layers of trust</p>
+          <h2>An agent with a stopping condition.</h2>
+          <p class="section-lede">
+            Language understanding belongs to the model. Policy belongs to code.
+            The final decision belongs to a person.
+          </p>
+        </div>
+
+        <div class="feature-grid">
+          <article class="feature">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <path d="M6 3.75A1.75 1.75 0 0 1 7.75 2h5.5L18 6.75v13.5A1.75 1.75 0 0 1 16.25 22h-8.5A1.75 1.75 0 0 1 6 20.25V3.75Z"/>
+              <path d="M13 2v5h5"/><path d="M9 12h6M9 16h6"/>
+            </svg>
+            <h3>Typed extraction</h3>
+            <p>
+              PydanticAI turns a receipt into a validated InvoiceData object:
+              vendor, date, total, currency, line items, category and confidence.
+              Malformed output is rejected before it reaches the ledger.
+            </p>
+          </article>
+
+          <article class="feature">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <path d="M12 3 4.5 6v5.5c0 4.6 3.2 8.3 7.5 9.5 4.3-1.2 7.5-4.9 7.5-9.5V6L12 3Z"/>
+              <path d="m8.8 12 2.2 2.2 4.2-4.4"/>
+            </svg>
+            <h3>Deterministic policy</h3>
+            <p>
+              Four checks run in Python: category budget, approved vendor,
+              duplicate history and a $500 auto-approval ceiling. Same input,
+              same result, every time.
+            </p>
+          </article>
+
+          <article class="feature">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <path d="M4 6h8M4 12h16M4 18h6"/>
+              <circle cx="16" cy="6" r="2.2"/><circle cx="14" cy="18" r="2.2"/>
+            </svg>
+            <h3>A pause you can audit</h3>
+            <p>
+              Flagged invoices stop at PENDING_REVIEW. The extraction, every tool
+              payload and the reviewer's decision are stored as an ordered trace.
+            </p>
+          </article>
+        </div>
+      </div>
+    </section>
+
+    <section class="section section--surface" id="workflow">
+      <div class="inner">
+        <div class="section-head">
+          <p class="eyebrow">The loop</p>
+          <h2>Read. Check. Route. Decide.</h2>
+        </div>
+
+        <ol class="steps">
+          <li class="step">
+            <span class="step-number">01</span>
+            <div>
+              <h3>Read the receipt</h3>
+              <p>
+                The extraction agent returns a strict InvoiceData model. In demo
+                mode a deterministic parser does the same work, so the workflow
+                runs without an API key.
+              </p>
+            </div>
+            <span class="step-tag">PydanticAI</span>
+          </li>
+          <li class="step">
+            <span class="step-number">02</span>
+            <div>
+              <h3>Check company policy</h3>
+              <p>
+                Budget limit, vendor allow-list, duplicate history and the
+                approval ceiling run as plain Python functions against
+                data/policies.json and the SQLite ledger.
+              </p>
+            </div>
+            <span class="step-tag">Python</span>
+          </li>
+          <li class="step">
+            <span class="step-number">03</span>
+            <div>
+              <h3>Route the invoice</h3>
+              <p>
+                A clean invoice at or below $500 is auto-approved. Any failed
+                check, duplicate or larger total becomes PENDING_REVIEW with a
+                machine-readable reason.
+              </p>
+            </div>
+            <span class="step-tag">State machine</span>
+          </li>
+          <li class="step">
+            <span class="step-number">04</span>
+            <div>
+              <h3>Record the decision</h3>
+              <p>
+                A reviewer approves or rejects with an optional note. The decision
+                is appended to the trace and the status becomes terminal.
+              </p>
+            </div>
+            <span class="step-tag">Human</span>
+          </li>
+        </ol>
+      </div>
+    </section>
+
+    <section class="section" id="demo">
+      <div class="inner">
+        <div class="section-head">
+          <p class="eyebrow">Interactive preview</p>
+          <h2>Try the decision path.</h2>
+          <p class="section-lede">
+            A front-end preview of the Streamlit dashboard, using the four bundled
+            receipts. The Python workflow remains the source of truth.
+          </p>
+        </div>
+
+        <div class="demo-shell">
+          <div class="demo-toolbar" role="group" aria-label="Sample receipts">
+            <button class="sample-button" type="button" data-sample="clean" aria-pressed="true">Clean invoice</button>
+            <button class="sample-button" type="button" data-sample="travel" aria-pressed="false">Travel over budget</button>
+            <button class="sample-button" type="button" data-sample="duplicate" aria-pressed="false">Duplicate</button>
+            <button class="sample-button" type="button" data-sample="vendor" aria-pressed="false">Blocked vendor</button>
+          </div>
+
+          <div class="demo-body">
+            <div class="demo-invoice">
+              <div class="demo-status" id="demo-status" data-status="AUTO_APPROVED" aria-live="polite">
+                <span class="dot"></span><span id="demo-status-label">Auto-approved</span>
+              </div>
+              <p class="demo-meta" id="demo-file">01_clean_software_receipt.txt</p>
+              <p class="demo-vendor" id="demo-vendor">Northwind Cloud Services</p>
+              <p class="demo-amount" id="demo-amount">$89.00</p>
+              <p class="demo-meta" id="demo-meta"></p>
+
+              <ul class="demo-flags" id="demo-flags"></ul>
+
+              <div class="demo-actions">
+                <div id="demo-note-wrap">
+                  <label class="mini-label" for="demo-note-input">Reviewer note</label>
+                  <textarea id="demo-note-input" placeholder="Optional note for the audit trail"></textarea>
+                </div>
+                <div class="button-row">
+                  <button class="button button-primary" type="button" id="demo-approve" disabled>Approve</button>
+                  <button class="button" type="button" id="demo-reject" disabled>Reject</button>
+                  <button class="button button-quiet" type="button" id="demo-reset">Reset</button>
+                </div>
+                <p class="demo-decision" id="demo-decision" aria-live="polite"></p>
+              </div>
+            </div>
+
+            <div class="demo-checks">
+              <p class="mini-label">Checks</p>
+              <ul class="check-list" id="demo-check-list"></ul>
+
+              <p class="mini-label" style="margin-top: 28px;">Trace</p>
+              <ol class="trace-list" id="demo-trace"></ol>
+            </div>
+          </div>
+        </div>
+        <noscript>
+          <p class="table-note">
+            The interactive preview needs JavaScript. The full audit workflow is in
+            the repository and runs locally with Python.
+          </p>
+        </noscript>
+      </div>
+    </section>
+
+    <section class="section section--surface" id="policy">
+      <div class="inner policy-grid">
+        <div class="policy-copy">
+          <p class="eyebrow">Policy</p>
+          <h2>Rules live in a file.</h2>
+          <p>
+            Category limits, approved and blocked vendors, the duplicate window
+            and the approval ceiling are ordinary JSON. Changing policy does not
+            require a code change.
+          </p>
+          <p class="mini-label">Auto-approval ceiling</p>
+          <p class="policy-big">$500</p>
+          <p>
+            Anything above this total pauses for a human, even when the category
+            budget allows it.
+          </p>
+        </div>
+
+        <div>
+          <table class="policy-table">
+            <thead>
+              <tr><th scope="col">Category</th><th scope="col">Limit</th></tr>
+            </thead>
+            <tbody>
+              <tr><td>Software</td><td>$2,500</td></tr>
+              <tr><td>Travel</td><td>$800</td></tr>
+              <tr><td>Meals</td><td>$75</td></tr>
+              <tr><td>Office supplies</td><td>$300</td></tr>
+              <tr><td>Hardware</td><td>$1,500</td></tr>
+              <tr><td>Professional services</td><td>$5,000</td></tr>
+              <tr><td>Training</td><td>$1,200</td></tr>
+              <tr><td>Other</td><td>$250</td></tr>
+            </tbody>
+          </table>
+          <p class="table-note">
+            Vendor allow-lists, blocked suppliers, duplicate lookback and escalation
+            contacts live in <code>data/policies.json</code>.
+          </p>
+        </div>
+      </div>
+    </section>
+
+    <section class="section" id="architecture">
+      <div class="inner">
+        <div class="section-head">
+          <p class="eyebrow">Architecture</p>
+          <h2>Built to explain itself.</h2>
+        </div>
+
+        <div class="architecture-grid">
+          <div class="architecture-item">
+            <span class="arch-index">01 / Agent</span>
+            <h3>PydanticAI</h3>
+            <p>
+              Structured output, dependency injection and function tools. The
+              model can consult policy while extracting; it cannot approve an
+              invoice.
+            </p>
+          </div>
+          <div class="architecture-item">
+            <span class="arch-index">02 / Gate</span>
+            <h3>Deterministic tools</h3>
+            <p>
+              Budget, vendor and duplicate checks query local policy and the
+              ledger. Their payloads are the only inputs to routing.
+            </p>
+          </div>
+          <div class="architecture-item">
+            <span class="arch-index">03 / Ledger</span>
+            <h3>SQLite and trace</h3>
+            <p>
+              Each audit stores its invoice, policy results, ordered trace and
+              human decision. Terminal decisions are immutable.
+            </p>
+          </div>
+        </div>
+
+        <p class="architecture-note">
+          FastAPI and Streamlit share one <code>run_audit()</code> entry point.
+          The interface you are reading is a static preview; the application runs
+          locally with Python.
+        </p>
+      </div>
+    </section>
+  </main>
+
+  <footer class="site-footer">
+    <div class="inner footer-inner">
+      <p>AuditFlow · MIT License · 2026 Daiwik Khedekar</p>
+      <nav class="footer-links" aria-label="Footer">
+        <a href="https://github.com/dkhedekar79/AuditFlow---agentic-ai-stuff">Source</a>
+        <a href="https://github.com/dkhedekar79/AuditFlow---agentic-ai-stuff#readme">Documentation</a>
+        <a href="#top">Back to top</a>
+      </nav>
+    </div>
+  </footer>
+
+  <script src="/app.js" defer></script>
+</body>
+</html>
