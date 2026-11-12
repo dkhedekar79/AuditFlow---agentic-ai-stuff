@@ -1,0 +1,30 @@
+{
+  "receipt_type": "invoice",
+  "vendor": "Contoso Travel Group",
+  "invoice_number": "CTG-88213",
+  "date": "2026-11-02",
+  "currency": "USD",
+  "category": "travel",
+  "total_amount": 1249.0,
+  "line_items": [
+    {
+      "description": "Round-trip airfare SEA to JFK, economy flexible",
+      "quantity": 1,
+      "unit_price": 740.0,
+      "amount": 740.0
+    },
+    {
+      "description": "Hotel, 2 nights in New York",
+      "quantity": 2,
+      "unit_price": 189.5,
+      "amount": 379.0
+    },
+    {
+      "description": "Airport transfer",
+      "quantity": 1,
+      "unit_price": 130.0,
+      "amount": 130.0
+    }
+  ],
+  "notes": "Q4 partner summit. Traveller: A. Raman. Manager pre-approval referenced in the comment field of the original request."
+}
