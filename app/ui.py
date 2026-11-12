@@ -20,6 +20,7 @@ import html
 import json
 import logging
 import sys
+from datetime import datetime
 from pathlib import Path
 
 # ``streamlit run app/ui.py`` puts the script directory on sys.path, not the
@@ -503,6 +504,202 @@ def _render_demo_suite(factory: SessionFactory, samples: list[Path]) -> None:
             )
 
 
+def _format_timestamp(value: datetime | None) -> str:
+    """Format an audit timestamp for display."""
+
+    if value is None:
+        return "—"
+    return value.strftime("%Y-%m-%d %H:%M UTC")
+
+
+def _render_audit_identity(record: AuditRecord) -> None:
+    """Render the vendor, amount, status and provenance of an audit."""
+
+    invoice = record.invoice
+    st.markdown(_status_badge(record.status), unsafe_allow_html=True)
+    st.markdown(f"### {html.escape(invoice.vendor)}")
+    st.markdown(
+        f"**{invoice.currency} {invoice.total_amount:,.2f}** · "
+        f"{invoice.date.isoformat()} · "
+        f"{invoice.category.replace('_', ' ').title()}"
+    )
+    st.markdown(
+        f'<span class="af-meta">Audit #{record.id} · '
+        f"{html.escape(record.source)} · {record.extraction_mode.value} extraction · "
+        f"{_format_timestamp(record.created_at)}</span>",
+        unsafe_allow_html=True,
+    )
+    if record.audit_flags:
+        st.warning(
+            "Flags: " + ", ".join(f"`{flag}`" for flag in record.audit_flags),
+            icon="⚠️",
+        )
+    if record.human_decision:
+        note = (
+            f" — \u201c{record.reviewer_note}\u201d" if record.reviewer_note else ""
+        )
+        st.info(
+            f"**{record.human_decision.value.title()}** by "
+            f"{record.reviewer or 'reviewer'} on "
+            f"{_format_timestamp(record.reviewed_at)}{note}",
+            icon="🧑‍⚖️",
+        )
+
+
+def _render_review_queue(factory: SessionFactory) -> None:
+    """Render the human-in-the-loop approval queue."""
+
+    st.subheader("Human review queue")
+    pending = list_audit_records(
+        factory, status=AuditStatus.PENDING_REVIEW, limit=200
+    )
+
+    if not pending:
+        st.success(
+            "No invoices are waiting for review. Run the over-limit, duplicate "
+            "or blocked-vendor sample to populate the queue.",
+            icon="🎉",
+        )
+        return
+
+    st.caption(
+        f"{len(pending)} invoice(s) are paused mid-workflow. Extraction and policy "
+        "results are frozen until you approve or reject them."
+    )
+
+    labels = {
+        f"#{record.id} · {record.invoice.vendor} · "
+        f"{record.invoice.currency} {record.invoice.total_amount:,.2f}": record
+        for record in pending
+    }
+    selected = st.selectbox("Flagged invoice", options=list(labels))
+    record = labels[selected]
+
+    invoice_col, decision_col = st.columns([1.0, 1.05], gap="large")
+
+    with invoice_col:
+        _render_audit_identity(record)
+        st.markdown("##### Extracted invoice")
+        st.json(record.invoice.model_dump(mode="json"), expanded=False)
+        st.markdown("##### Deterministic checks")
+        _render_policy_checks(record.policy_results)
+
+    with decision_col:
+        st.markdown("##### Reasoning trace")
+        _render_trace(record.trace, empty_message="No trace was recorded.")
+
+        st.divider()
+        st.markdown("##### Record your decision")
+        st.caption(
+            "Approving resumes the workflow; rejecting closes it. Either way the "
+            "decision is appended to the audit trace and cannot be changed again."
+        )
+        note = st.text_area(
+            "Reviewer note (optional)",
+            key=f"decision_note_{record.id}",
+            height=90,
+            placeholder="e.g. Manager pre-approval confirmed for the Q4 summit.",
+        )
+        reviewer = st.text_input(
+            "Reviewer",
+            value="human-reviewer",
+            key=f"reviewer_{record.id}",
+            max_chars=120,
+        )
+
+        approve_col, reject_col = st.columns(2)
+        approve = approve_col.button(
+            "✅ Approve",
+            type="primary",
+            key=f"approve_{record.id}",
+        )
+        reject = reject_col.button("⛔ Reject", key=f"reject_{record.id}")
+
+        if approve or reject:
+            clean_reviewer = reviewer.strip() or "human-reviewer"
+            if len(clean_reviewer) < 2:
+                st.error("Reviewer must be at least two characters.")
+            else:
+                decision = ReviewDecision(
+                    decision=(
+                        HumanDecision.APPROVED if approve else HumanDecision.REJECTED
+                    ),
+                    note=note.strip() or None,
+                    reviewer=clean_reviewer,
+                )
+                try:
+                    updated = apply_human_decision(factory, record.id, decision)
+                except LookupError as exc:
+                    st.error(str(exc))
+                except InvalidStateTransition as exc:
+                    st.error(str(exc))
+                else:
+                    st.toast(
+                        f"Audit #{record.id} moved to {updated.status.value}.",
+                        icon="✅" if approve else "⛔",
+                    )
+                    st.rerun()
+
+
+def _render_trace_inspector(factory: SessionFactory) -> None:
+    """Render the audit trace inspector for any stored record."""
+
+    st.subheader("Audit trace inspector")
+    records = list_audit_records(factory, limit=200)
+    if not records:
+        st.info(
+            "No audits yet. Run a receipt from the Upload tab and its full "
+            "reasoning trace will appear here.",
+            icon="🔍",
+        )
+        return
+
+    labels = {
+        f"#{record.id} · {record.status.value} · {record.invoice.vendor} · "
+        f"{record.invoice.currency} {record.invoice.total_amount:,.2f}": record
+        for record in records
+    }
+    selected = st.selectbox("Audit record", options=list(labels))
+    record = labels[selected]
+
+    _render_audit_identity(record)
+
+    failed = [result for result in record.policy_results if not result.passed]
+    metric_cols = st.columns(4)
+    metric_cols[0].metric(
+        "Total", f"{record.invoice.currency} {record.invoice.total_amount:,.2f}"
+    )
+    metric_cols[1].metric(
+        "Extraction confidence", f"{record.invoice.confidence_score:.0%}"
+    )
+    metric_cols[2].metric("Failed checks", len(failed))
+    metric_cols[3].metric("Trace steps", len(record.trace))
+
+    st.download_button(
+        "⬇️ Download audit JSON",
+        data=json.dumps(record.model_dump(mode="json"), indent=2),
+        file_name=f"auditflow-audit-{record.id}.json",
+        mime="application/json",
+        key=f"download_audit_{record.id}",
+    )
+
+    trace_tab, checks_tab, invoice_tab, raw_tab = st.tabs(
+        ["🧠 Trace timeline", "🛡️ Policy results", "📄 Extracted invoice", "🧾 Raw record"]
+    )
+    with trace_tab:
+        st.caption(
+            "Every step the workflow executed, in order. Tool outputs are the "
+            "exact deterministic payloads used for routing."
+        )
+        _render_trace(record.trace, empty_message="No trace was recorded.")
+    with checks_tab:
+        _render_policy_checks(record.policy_results)
+    with invoice_tab:
+        st.json(record.invoice.model_dump(mode="json"), expanded=False)
+    with raw_tab:
+        st.json(record.model_dump(mode="json"), expanded=False)
+
+
 def main() -> None:
     """Compose the dashboard."""
 
@@ -513,9 +710,23 @@ def main() -> None:
         st.error(f"Could not open the AuditFlow ledger: {exc}")
         st.stop()
 
+    counts = count_by_status(factory)
     _render_sidebar(factory)
     _render_header(describe_runtime())
-    _render_upload_tab(factory)
+
+    upload_tab, queue_tab, trace_tab = st.tabs(
+        [
+            "📥 Upload / Test Sample",
+            f"🧑‍⚖️ Human Review Queue ({counts[AuditStatus.PENDING_REVIEW]})",
+            "🔍 Audit Trace Inspector",
+        ]
+    )
+    with upload_tab:
+        _render_upload_tab(factory)
+    with queue_tab:
+        _render_review_queue(factory)
+    with trace_tab:
+        _render_trace_inspector(factory)
 
 
 if __name__ == "__main__":
