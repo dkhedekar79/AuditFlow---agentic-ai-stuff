@@ -317,3 +317,82 @@ class TraceStep(BaseModel):
         default_factory=lambda: dt.datetime.now(dt.timezone.utc),
         description="UTC timestamp for the step.",
     )
+
+
+class AuditBase(BaseModel):
+    """Fields shared by an in-flight audit outcome and its persisted record."""
+
+    invoice: InvoiceData
+    policy_results: list[PolicyResult] = Field(default_factory=list)
+    audit_flags: list[str] = Field(
+        default_factory=list,
+        description="Machine-readable reasons the invoice needs attention.",
+    )
+    status: AuditStatus
+    trace: list[TraceStep] = Field(default_factory=list)
+    extraction_mode: ExtractionMode
+    model_name: str | None = Field(
+        default=None, description="PydanticAI model identifier, if an LLM was used."
+    )
+    source: str = Field(
+        min_length=1, max_length=255, description="Receipt filename or upload origin."
+    )
+
+    @property
+    def failed_checks(self) -> list[PolicyResult]:
+        """Policy results that did not pass, in evaluation order."""
+
+        return [result for result in self.policy_results if not result.passed]
+
+    @property
+    def requires_human_review(self) -> bool:
+        """True while the audit is paused waiting for a reviewer."""
+
+        return self.status is AuditStatus.PENDING_REVIEW
+
+
+class AuditRecord(AuditBase):
+    """A persisted audit, including its reasoning trace and human decision."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int = Field(gt=0)
+    human_decision: HumanDecision | None = None
+    reviewer: str | None = Field(default=None, max_length=120)
+    reviewer_note: str | None = Field(default=None, max_length=1000)
+    reviewed_at: dt.datetime | None = None
+    created_at: dt.datetime
+    updated_at: dt.datetime
+
+    @property
+    def is_terminal(self) -> bool:
+        """True once a human decision has been recorded."""
+
+        return self.status in TERMINAL_STATUSES
+
+
+class AuditOutcome(AuditBase):
+    """Result of one agent run, before or after it is written to the ledger."""
+
+    record_id: int | None = Field(
+        default=None, description="Ledger id assigned when the audit was persisted."
+    )
+
+
+class ReviewDecision(BaseModel):
+    """A human review action submitted from the dashboard or API."""
+
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    decision: HumanDecision = Field(description="Approve or reject the invoice.")
+    note: str | None = Field(
+        default=None,
+        max_length=1000,
+        description="Optional override or rejection rationale.",
+    )
+    reviewer: str = Field(
+        default="human-reviewer",
+        min_length=2,
+        max_length=120,
+        description="Name or email of the person recording the decision.",
+    )
