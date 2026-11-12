@@ -1,0 +1,129 @@
+{
+  "version": "2026.1",
+  "company": "Northwind Robotics, Inc.",
+  "base_currency": "USD",
+  "auto_approve_threshold": 500.0,
+  "receipt_required_above": 25.0,
+  "duplicate_lookback_days": 180,
+  "duplicate_amount_tolerance": 0.01,
+  "categories": {
+    "software": {
+      "budget_limit": 2500.0,
+      "description": "SaaS subscriptions, developer tooling and licence renewals.",
+      "examples": ["IDE seats", "observability", "CI minutes"],
+      "requires_manager_approval_above": 1500.0
+    },
+    "travel": {
+      "budget_limit": 800.0,
+      "description": "Flights, rail, lodging and ground transport for business travel.",
+      "examples": ["airfare", "hotel", "airport transfers"],
+      "requires_manager_approval_above": 600.0
+    },
+    "meals": {
+      "budget_limit": 75.0,
+      "description": "Client meals and team offsites. Alcohol is never reimbursable.",
+      "examples": ["client dinner", "team lunch"],
+      "requires_manager_approval_above": 50.0
+    },
+    "office_supplies": {
+      "budget_limit": 300.0,
+      "description": "Consumables and small desk equipment for the office.",
+      "examples": ["stationery", "cables", "docking stations"],
+      "requires_manager_approval_above": 250.0
+    },
+    "hardware": {
+      "budget_limit": 1500.0,
+      "description": "Laptops, monitors and peripherals assigned to an employee.",
+      "examples": ["laptop", "monitor", "headset"],
+      "requires_manager_approval_above": 1000.0
+    },
+    "professional_services": {
+      "budget_limit": 5000.0,
+      "description": "Legal, accounting and contracted consulting engagements.",
+      "examples": ["audit fees", "security review", "consulting retainer"],
+      "requires_manager_approval_above": 3000.0
+    },
+    "training": {
+      "budget_limit": 1200.0,
+      "description": "Courses, certifications and conference tickets.",
+      "examples": ["certification exam", "conference pass"],
+      "requires_manager_approval_above": 900.0
+    },
+    "other": {
+      "budget_limit": 250.0,
+      "description": "Unclassified spend. Finance reviews every charge in this bucket.",
+      "examples": ["miscellaneous"],
+      "requires_manager_approval_above": 100.0
+    }
+  },
+  "approved_vendors": [
+    {
+      "name": "Northwind Cloud Services",
+      "aliases": ["Northwind Cloud", "Northwind Cloud Svcs", "NWC"],
+      "category": "software",
+      "risk_level": "low",
+      "payment_terms": "Net 30",
+      "onboarded": "2024-03-12"
+    },
+    {
+      "name": "Contoso Travel Group",
+      "aliases": ["Contoso Travel", "Contoso Corporate Travel"],
+      "category": "travel",
+      "risk_level": "low",
+      "payment_terms": "Net 15",
+      "onboarded": "2023-09-01"
+    },
+    {
+      "name": "Fabrikam Office Supply",
+      "aliases": ["Fabrikam Office", "Fabrikam"],
+      "category": "office_supplies",
+      "risk_level": "low",
+      "payment_terms": "Net 30",
+      "onboarded": "2022-11-18"
+    },
+    {
+      "name": "Litware Hardware",
+      "aliases": ["Litware Devices"],
+      "category": "hardware",
+      "risk_level": "medium",
+      "payment_terms": "Net 45",
+      "onboarded": "2025-01-07"
+    },
+    {
+      "name": "Trey Research Advisors",
+      "aliases": ["Trey Research"],
+      "category": "professional_services",
+      "risk_level": "low",
+      "payment_terms": "Net 30",
+      "onboarded": "2024-06-21"
+    },
+    {
+      "name": "Adatum Training Labs",
+      "aliases": ["Adatum Training"],
+      "category": "training",
+      "risk_level": "low",
+      "payment_terms": "Due on receipt",
+      "onboarded": "2025-04-02"
+    },
+    {
+      "name": "Coho Coffee Roasters",
+      "aliases": ["Coho Coffee"],
+      "category": "meals",
+      "risk_level": "low",
+      "payment_terms": "Due on receipt",
+      "onboarded": "2025-02-14"
+    }
+  ],
+  "blocked_vendors": [
+    {
+      "name": "QuickCash Gadgets Ltd",
+      "reason": "Failed the 2025 supplier security review and is not permitted to invoice Northwind Robotics.",
+      "blocked_since": "2025-08-30"
+    }
+  ],
+  "escalation": {
+    "finance_owner": "finance@northwind-robotics.example",
+    "procurement_owner": "procurement@northwind-robotics.example",
+    "sla_hours": 24
+  }
+}
