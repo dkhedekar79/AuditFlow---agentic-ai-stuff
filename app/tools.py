@@ -13,11 +13,14 @@ from __future__ import annotations
 import json
 import math
 import threading
+from datetime import date as DateType
+from datetime import datetime
 from json import JSONDecodeError
 from pathlib import Path
 from typing import Any
 
-from app.models import AuditFlowError, normalise_category
+from app.database import SessionFactory, find_duplicate_invoice, get_session_factory
+from app.models import AuditFlowError, normalise_category, normalise_vendor_name
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_POLICIES_PATH = PROJECT_ROOT / "data" / "policies.json"
@@ -264,6 +267,216 @@ def check_auto_approve_threshold(
         "message": message,
         "policy_reference": "auto_approve_threshold",
     }
+
+
+def list_approved_vendors(
+    policies: dict[str, Any] | None = None,
+) -> list[dict[str, Any]]:
+    """Return a compact view of the approved-vendor allow-list."""
+
+    document = policies or load_policies()
+    return sorted(
+        (
+            {
+                "name": str(vendor.get("name", "")),
+                "category": vendor.get("category"),
+                "risk_level": vendor.get("risk_level"),
+                "payment_terms": vendor.get("payment_terms"),
+            }
+            for vendor in document.get("approved_vendors", [])
+            if vendor.get("name")
+        ),
+        key=lambda vendor: vendor["name"].lower(),
+    )
+
+
+def verify_approved_vendor(
+    vendor: str, *, policies: dict[str, Any] | None = None
+) -> dict[str, Any]:
+    """Verify a vendor against the approved allow-list and blocked list.
+
+    Matching is normalised (case, punctuation and legal suffixes are ignored)
+    and checks aliases, so ``"Northwind Cloud Svcs"`` resolves to the approved
+    ``"Northwind Cloud Services"``.
+
+    Args:
+        vendor: Vendor name as extracted from the receipt.
+        policies: Optional pre-loaded policy document.
+
+    Returns:
+        A payload with ``passed``/``approved`` plus the matched vendor's risk
+        level and payment terms. Blocked vendors are reported separately.
+
+    Raises:
+        ValueError: If the vendor name is too short to match safely.
+    """
+
+    document = policies or load_policies()
+    key = normalise_vendor_name(vendor)
+    if len(key) < 2:
+        raise ValueError("vendor must contain at least two alphanumeric characters")
+
+    base: dict[str, Any] = {
+        "tool": "verify_approved_vendor",
+        "vendor": vendor,
+        "normalised_vendor": key,
+        "approved": False,
+        "blocked": False,
+        "matched_vendor": None,
+        "risk_level": None,
+        "payment_terms": None,
+        "policy_reference": "approved_vendors",
+    }
+
+    for blocked in document.get("blocked_vendors", []):
+        if normalise_vendor_name(str(blocked.get("name", ""))) == key:
+            return {
+                **base,
+                "passed": False,
+                "blocked": True,
+                "matched_vendor": blocked.get("name"),
+                "message": (
+                    f"{blocked.get('name', vendor)} is on the blocked-vendor list. "
+                    f"{(blocked.get('reason') or 'Procurement must review this supplier.').strip()}"
+                ),
+                "policy_reference": "blocked_vendors",
+            }
+
+    for approved in document.get("approved_vendors", []):
+        names = [str(approved.get("name", ""))] + [
+            str(alias) for alias in approved.get("aliases", [])
+        ]
+        if key in {normalise_vendor_name(name) for name in names if name}:
+            terms = approved.get("payment_terms") or "not specified"
+            return {
+                **base,
+                "passed": True,
+                "approved": True,
+                "matched_vendor": approved.get("name"),
+                "risk_level": approved.get("risk_level"),
+                "payment_terms": approved.get("payment_terms"),
+                "onboarded": approved.get("onboarded"),
+                "message": (
+                    f"{approved.get('name')} is an approved vendor "
+                    f"(risk: {approved.get('risk_level', 'unknown')}, terms: {terms})."
+                ),
+            }
+
+    return {
+        **base,
+        "passed": False,
+        "message": (
+            f"{vendor} is not on the approved-vendor list. Procurement must onboard "
+            "the supplier before payment can be released."
+        ),
+    }
+
+
+def duplicate_check(
+    vendor: str,
+    date: str | DateType,
+    amount: float,
+    *,
+    policies: dict[str, Any] | None = None,
+    session_factory: SessionFactory | None = None,
+    exclude_id: int | None = None,
+) -> dict[str, Any]:
+    """Look for an earlier audit with the same vendor, date and amount.
+
+    Args:
+        vendor: Vendor name on the receipt.
+        date: Invoice date as an ISO string or ``date``.
+        amount: Invoice total in the policy base currency.
+        policies: Optional pre-loaded policy document.
+        session_factory: Optional database factory (defaults to the app ledger).
+        exclude_id: Audit id to ignore when re-checking an existing record.
+
+    Returns:
+        A payload with ``duplicate_found`` and the matching record's id when found.
+
+    Raises:
+        ValueError: If the date or amount is invalid.
+    """
+
+    document = policies or load_policies()
+    if not math.isfinite(amount) or amount <= 0:
+        raise ValueError("amount must be a positive, finite number")
+
+    parsed_date = _parse_invoice_date(date)
+    lookback_days, tolerance = get_duplicate_settings(document)
+    factory = session_factory or get_session_factory()
+    currency = get_base_currency(document)
+    money = _money(currency)
+
+    match = find_duplicate_invoice(
+        factory,
+        vendor=vendor,
+        invoice_date=parsed_date,
+        total_amount=amount,
+        exclude_id=exclude_id,
+        lookback_days=lookback_days,
+        amount_tolerance=tolerance,
+    )
+
+    base: dict[str, Any] = {
+        "tool": "check_duplicate_invoice",
+        "vendor": vendor,
+        "date": parsed_date.isoformat(),
+        "amount": round(float(amount), 2),
+        "currency": currency,
+        "lookback_days": lookback_days,
+        "passed": match is None,
+        "duplicate_found": match is not None,
+        "matched_record_id": match.id if match else None,
+        "matched_status": match.status.value if match else None,
+        "policy_reference": "duplicate_lookback_days",
+    }
+
+    if match is None:
+        return {
+            **base,
+            "message": (
+                "No earlier audit matches this vendor, date and amount within the "
+                f"{lookback_days}-day lookback window."
+            ),
+        }
+
+    return {
+        **base,
+        "matched_vendor": match.invoice.vendor,
+        "matched_total": match.invoice.total_amount,
+        "matched_created_at": match.created_at.isoformat(),
+        "message": (
+            f"Possible duplicate: audit #{match.id} already covers "
+            f"{match.invoice.vendor} on {parsed_date.isoformat()} for "
+            f"{money(match.invoice.total_amount)} (status {match.status.value})."
+        ),
+    }
+
+
+def check_duplicate_invoice(vendor: str, date: str, amount: float) -> bool:
+    """Return ``True`` when this invoice duplicates an earlier audit.
+
+    This is the concise tool signature exposed to the agent. Callers that need
+    the matching record use :func:`duplicate_check` instead.
+    """
+
+    return bool(duplicate_check(vendor, date, amount)["duplicate_found"])
+
+
+def _parse_invoice_date(value: str | DateType) -> DateType:
+    """Parse an ISO date string, passing through ``date`` instances."""
+
+    if isinstance(value, datetime):
+        return value.date()
+    if isinstance(value, DateType):
+        return value
+    try:
+        return DateType.fromisoformat(str(value).strip())
+    except ValueError as exc:
+        raise ValueError(
+            f"Invalid invoice date {value!r}; expected ISO format YYYY-MM-DD."
+        ) from exc
 
 
 def _money(currency: str):
