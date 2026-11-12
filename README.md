@@ -46,9 +46,9 @@ The result is an agent whose **output is data, not authority**.
 - **Typed extraction** — receipts become a strict `InvoiceData` model
   (`vendor`, `date`, `total_amount`, `currency`, `line_items`, `category`,
   `confidence_score`); malformed model output is rejected by Pydantic and retried.
-- **Three deterministic guardrails** — category budget limits, an approved-vendor
-  allow-list (with blocked suppliers) and duplicate-invoice detection against the
-  SQLite ledger.
+- **Deterministic guardrails** — category budget limits, an approved-vendor
+  allow-list (with blocked suppliers), duplicate-invoice detection against the
+  SQLite ledger, and a hard auto-approval ceiling.
 - **Routing with a real state machine** — clean invoices at or below **$500** are
   `AUTO_APPROVED`; failed checks, duplicates or larger totals become
   `PENDING_REVIEW` with explicit audit flags.
@@ -146,8 +146,8 @@ stateDiagram-v2
     Extracting --> PolicyChecks: InvoiceData validated
     Extracting --> Failed: extraction error
 
-    PolicyChecks --> AutoApproved: all checks pass and total <= $500
-    PolicyChecks --> PendingReview: any failure, duplicate, or total > $500
+    PolicyChecks --> AutoApproved: all checks pass and total at most $500
+    PolicyChecks --> PendingReview: any failure, duplicate, or total above $500
 
     PendingReview --> Approved: reviewer approves, optional override note
     PendingReview --> Rejected: reviewer rejects, optional reason
@@ -247,3 +247,211 @@ extractor takes over and the trace records an `llm_fallback` step. Set
 
 > The duplicate sample is only detectable **after** the clean invoice exists. Run
 > the suite in order, or run the clean sample before the duplicate sample.
+
+---
+
+## HTTP API
+
+The dashboard is the primary interface, but the workflow is also a small JSON
+API. Start it with:
+
+```bash
+uvicorn app.api:app --reload --port 8000
+# interactive docs: http://127.0.0.1:8000/docs
+```
+
+| Method | Path | Purpose |
+| --- | --- | --- |
+| `GET` | `/health` | Liveness plus the active extraction mode |
+| `GET` | `/runtime` | Mode, model and safety flags |
+| `POST` | `/audits` | Run extraction, guardrails and routing; persist the audit |
+| `GET` | `/audits` | List audits (`?status=PENDING_REVIEW&limit=50&offset=0`) |
+| `GET` | `/audits/stats` | Counts for every lifecycle status |
+| `GET` | `/audits/{id}` | Fetch one audit with its full trace |
+| `POST` | `/audits/{id}/decision` | Record a human approve/reject decision |
+
+```bash
+# Audit a receipt (demo mode if no key is configured)
+curl -s -X POST http://127.0.0.1:8000/audits \
+  -H 'Content-Type: application/json' \
+  --data @- <<'JSON' | python -m json.tool
+{"text": "Vendor: Northwind Cloud Services\nDate: 2026-10-14\nTotal: 89.00", "source": "curl-clean.txt"}
+JSON
+
+# Resume a paused audit with a human decision
+curl -s -X POST http://127.0.0.1:8000/audits/1/decision \
+  -H 'Content-Type: application/json' \
+  -d '{"decision": "APPROVED", "note": "Manager approved.", "reviewer": "daiwik"}'
+```
+
+Errors are explicit: `422` for unreadable receipts or invalid payloads, `404`
+for unknown audits, and `409` when a terminal audit is decided twice.
+
+---
+
+## Configuration
+
+Copy [`.env.example`](.env.example) to `.env`. Real environment variables always
+win over the file.
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `OPENAI_API_KEY` | empty | Enables OpenAI extraction when set |
+| `ANTHROPIC_API_KEY` | empty | Enables Anthropic extraction when set |
+| `MODEL_NAME` | inferred | PydanticAI model string, e.g. `openai:gpt-4o-mini` |
+| `AUDITFLOW_DEMO_MODE` | `0` | Force the deterministic extractor even with a key present |
+| `AUDITFLOW_STRICT_LLM` | `0` | Fail instead of falling back when an LLM call fails |
+| `AUDITFLOW_DB_PATH` | `auditflow.db` | SQLite file for the audit ledger |
+| `AUDITFLOW_TRACE_LOG` | empty | Optional JSON-lines sink for every trace step |
+| `LOGFIRE_TOKEN` | empty | Stream PydanticAI spans to Logfire |
+
+### Policy
+
+[`data/policies.json`](data/policies.json) is the source of truth for:
+
+- **Category budgets** — software, travel, meals, office supplies, hardware,
+  professional services, training and an `other` fallback. Unknown categories
+  fail closed instead of guessing a limit.
+- **Auto-approval ceiling** — currently `$500`; any total above it pauses for a
+  human even if the category budget is fine.
+- **Approved vendors** — names plus aliases, risk level and payment terms.
+- **Blocked vendors** — explicit denial with the reason shown in the review queue.
+- **Duplicate window** — lookback days and amount tolerance used by duplicate
+  detection.
+
+The policy loader caches by file modification time, so editing the JSON is picked
+up without a code change or restart.
+
+> Budgets are enforced in the policy's base currency (`USD`). AuditFlow records
+> the receipt currency but does **not** perform FX conversion, so a EUR receipt is
+> compared numerically against USD limits. Treat multi-currency support as a
+> production hardening task rather than a solved feature.
+
+---
+
+## Project structure
+
+```text
+.
+├── app/
+│   ├── __init__.py
+│   ├── models.py          # InvoiceData, PolicyResult, TraceStep, AuditRecord, ReviewDecision
+│   ├── database.py        # SQLite schema, CRUD, duplicate lookup, state machine
+│   ├── tools.py           # budget, vendor and duplicate guardrails + policies.json loader
+│   ├── parsing.py         # PDF (pypdf/pdfplumber), JSON and text ingestion
+│   ├── agent.py           # PydanticAI agent, demo extractor, routing and trace collector
+│   ├── api.py             # FastAPI surface
+│   └── ui.py              # Streamlit dashboard (upload, review queue, trace inspector)
+├── data/
+│   ├── policies.json
+│   └── sample_receipts/
+│       ├── 01_clean_software_receipt.txt
+│       ├── 02_over_limit_travel.json
+│       ├── 03_duplicate_software_receipt.txt
+│       └── 04_unapproved_vendor_receipt.json
+├── tests/
+│   ├── test_agent_evals.py  # routing evals, guardrails, HITL state machine, traces
+│   └── test_api.py          # FastAPI contract tests
+├── .env.example
+├── .streamlit/config.toml
+├── pytest.ini
+├── requirements.txt
+├── LICENSE
+└── README.md
+```
+
+---
+
+## Tests and evaluation
+
+```bash
+pytest -q
+```
+
+Everything runs offline: the suite forces demo mode and uses a temporary SQLite
+file per test. The core evaluation is parameterised over the four shipped
+receipts and asserts the documented status **and** audit flags, so a regression in
+extraction, policy tools or routing fails loudly.
+
+Coverage includes:
+
+- the four routing outcomes and their exact flags;
+- typed extraction for every sample, plus malformed-input errors;
+- budget, vendor and duplicate guardrails;
+- human approval/rejection, notes, trace append and illegal second decisions;
+- rejected invoices not blocking a legitimate resubmission;
+- trace completeness, JSON serialisation and the JSON-lines sink;
+- FastAPI create/list/stats/decision endpoints and their error codes.
+
+---
+
+## Design notes
+
+**The model proposes; Python disposes.** The LLM is excellent at turning a PDF
+into a typed invoice and poor at being an authority on company policy. AuditFlow
+lets it call the policy tools for context, then ignores its opinion and re-runs
+the guardrails deterministically. The same checks run in demo mode, which is why
+routing is reproducible in tests.
+
+**A trace is data, not a log line.** Each step is a validated `TraceStep` stored
+with the audit, not a string in a rotating file. That makes the UI's timeline, the
+downloadable audit export and the JSON-lines sink views over the same facts.
+
+**Human decisions are append-only.** Status transitions are validated centrally.
+Once an audit is approved or rejected, a second decision raises
+`InvalidStateTransition` rather than overwriting the reviewer's name and rationale.
+
+**Guardrails are enforced twice for LLM runs.** The agent may call
+`check_budget_limit`, `verify_approved_vendor` and `check_duplicate_invoice` while
+it reasons; the authoritative gate then calls the same functions again. Tool calls
+made by the model are tagged `agent.*` in the trace, deterministic gate calls are
+tagged `policy.*`, so a reviewer can tell them apart.
+
+**Prompt injection is contained, not eliminated.** Receipt text is wrapped between
+explicit markers and the prompt tells the model to treat it as data. More
+importantly, the model cannot approve anything: its output must validate as
+`InvoiceData`, and the human gate catches suspicious extractions. Do not expose
+this demo API to untrusted users without authentication and rate limiting.
+
+**SQLite is deliberate.** A single-file ledger with WAL mode keeps the clone-and-run
+experience instant and makes duplicate detection trivial to test. The storage
+boundary is isolated in `app/database.py`; Postgres plus migrations is the natural
+next step for multi-user deployment.
+
+---
+
+## Limitations and roadmap
+
+Known limitations of this reference implementation:
+
+- PDF extraction needs a text layer; scanned images are rejected with a clear
+  message instead of being silently misread. OCR/vision extraction is not included.
+- No FX conversion; budgets are enforced in the policy base currency.
+- The API has no authentication, tenancy or rate limiting — it is a local demo
+  surface, not a production finance service.
+- The approval ceiling is global, not per department, cost centre or employee.
+- Line items are extracted and shown, but policy checks operate on invoice totals.
+- Duplicate detection matches normalised vendor + invoice date + amount; it does not
+  use fuzzy invoice numbers or embedding similarity.
+- SQLite serialises writes, which is ideal for one reviewer and a demo, not a large
+  finance team.
+
+Planned next steps:
+
+- OCR/vision fallback for scanned receipts and multi-page statements.
+- Department-level budgets and approval chains.
+- Postgres + Alembic, then SSO and role-based reviewer permissions.
+- Notification hooks (Slack/email) for audits approaching their review SLA.
+- Per-run LLM usage limits and cost dashboards in the trace inspector.
+- More adversarial fixtures: prompt-injection receipts, foreign currencies,
+  negative lines, tax-only invoices.
+
+---
+
+## Safety and license
+
+AuditFlow is a portfolio/reference project, not financial advice or a certified
+controls system. Review the policy engine and add authentication before pointing it
+at real spend.
+
+Released under the [MIT License](LICENSE) © 2026 Daiwik Khedekar.
